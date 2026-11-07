@@ -3,6 +3,8 @@
 #include "steam.h"
 
 #include <QFileInfo>
+#include <QDir>
+#include <QFileInfo>
 #include <QProcessEnvironment>
 
 namespace Launcher {
@@ -60,6 +62,13 @@ bool prepare(const Instance &instance, const Tool &tool, QProcess *process, QStr
     env.insert(QStringLiteral("STEAM_COMPAT_APP_ID"), appId);
     env.insert(QStringLiteral("SteamAppId"), appId);
     env.insert(QStringLiteral("SteamGameId"), appId);
+    /* What Steam passes too. With both, Proton maps the library to S:, where
+     * the game registers itself ("S:\\common\\Skyrim Special Edition"): a
+     * tool started without them, LOOT for one, can't find the game. */
+    env.insert(QStringLiteral("STEAM_COMPAT_INSTALL_PATH"), instance.gamePath());
+    const QDir common = QFileInfo(instance.gamePath()).dir();
+    if (common.dirName().compare(QLatin1String("common"), Qt::CaseInsensitive) == 0)
+        env.insert(QStringLiteral("STEAM_COMPAT_LIBRARY_PATHS"), QFileInfo(common.absolutePath()).absolutePath());
     process->setProcessEnvironment(env);
     process->setProgram(instance.protonPath());
     process->setArguments(QStringList{QStringLiteral("run"), exe} + splitArguments(tool.arguments));

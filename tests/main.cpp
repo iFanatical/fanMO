@@ -1769,6 +1769,36 @@ static void testUserlistSync()
     CHECK(warned);
 }
 
+/* Tools get what Steam gives the game, so Proton maps the same drives. */
+static void testLaunchEnvironment()
+{
+    QTemporaryDir tmp;
+    const QString steamapps = tmp.path() + QStringLiteral("/SteamLibrary/steamapps");
+    const QString game = steamapps + QStringLiteral("/common/Skyrim Special Edition");
+    put(game + QStringLiteral("/SkyrimSE.exe"), "x");
+    put(game + QStringLiteral("/Data/Skyrim.esm"), "TES4");
+    put(game + QStringLiteral("/tool.exe"), "exe");
+    QDir().mkpath(steamapps + QStringLiteral("/compatdata/489830/pfx"));
+    put(tmp.path() + QStringLiteral("/proton"), "#!/bin/sh\n");
+    QString error;
+    const QString root = tmp.path() + QStringLiteral("/inst");
+    CHECK(Instance::create(root, game, steamapps + QStringLiteral("/compatdata/489830"),
+                           tmp.path() + QStringLiteral("/proton"), &error));
+    Instance inst;
+    CHECK(inst.load(root, &error));
+    Tool tool;
+    tool.name = QStringLiteral("Tool");
+    tool.exe = QStringLiteral("tool.exe");
+    QProcess process;
+    CHECK(Launcher::prepare(inst, tool, &process, &error));
+    const QProcessEnvironment env = process.processEnvironment();
+    EQ(env.value(QStringLiteral("STEAM_COMPAT_INSTALL_PATH")), game);
+    EQ(QDir(env.value(QStringLiteral("STEAM_COMPAT_LIBRARY_PATHS"))).canonicalPath(), QDir(steamapps).canonicalPath());
+    EQ(env.value(QStringLiteral("STEAM_COMPAT_APP_ID")), QStringLiteral("489830"));
+    EQ(env.value(QStringLiteral("STEAM_COMPAT_DATA_PATH")), steamapps + QStringLiteral("/compatdata/489830"));
+    EQ(process.arguments().value(0), QStringLiteral("run"));
+}
+
 static void testHashes()
 {
     EQ(Util::wabbajackHash(0x0123456789abcdefULL), QStringLiteral("782riWdFIwE="));
@@ -1793,7 +1823,7 @@ int main(int argc, char *argv[])
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
     };
     for (const auto &t : tests) {
         const int before = failures;
