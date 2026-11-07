@@ -95,6 +95,31 @@ QString rootPrefix(const QStringList &files)
     return found ? best : pathPrefix(files);
 }
 
+bool isRootMod(const QStringList &files)
+{
+    /* Windows loads these from beside the game, not from Data. */
+    static const QStringList proxies{
+        QStringLiteral("binkw64.dll"), QStringLiteral("d3d11.dll"), QStringLiteral("d3dx9_42.dll"),
+        QStringLiteral("dinput8.dll"), QStringLiteral("dxgi.dll"), QStringLiteral("version.dll"),
+        QStringLiteral("winhttp.dll"), QStringLiteral("winmm.dll")};
+    bool proxy = false;
+    bool content = false;
+    for (const QString &f : files) {
+        const QString key = Util::foldKey(f);
+        const QString name = key.mid(key.lastIndexOf(QLatin1Char('/')) + 1);
+        if (name == QLatin1String("skse64_loader.exe"))
+            return true;
+        /* One folder deep allows for a wrapper around the whole archive. */
+        if (key.count(QLatin1Char('/')) <= 1 && proxies.contains(name))
+            proxy = true;
+        /* Game content outside a Data folder: this mod installs into Data. */
+        const bool underData = key.startsWith(QLatin1String("data/")) || key.contains(QLatin1String("/data/"));
+        if (!underData && stopPattern().match(f).hasMatch())
+            content = true;
+    }
+    return proxy && !content;
+}
+
 static QString stripData(const QString &destination)
 {
     if (destination.startsWith(QLatin1String("data/"), Qt::CaseInsensitive))

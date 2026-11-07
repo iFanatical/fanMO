@@ -102,6 +102,12 @@ public:
     const std::vector<Row> &rows() const { return m_rows; }
     void setEnabled(const QList<int> &rows, bool enabled);
     int problemCount() const;
+    /* Moves each plugin to just below the last of its masters that loads after
+     * it, then does the same for anything that move left above one of its own
+     * masters, so fixing one plugin doesn't break the next. A master that is
+     * absent or switched off can't be fixed by moving: those come back in
+     * unfixable as "plugin needs master". Returns how many moves it made. */
+    int moveAfterMasters(const QList<int> &rows, QStringList *unfixable = nullptr);
 
     int rowCount(const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;

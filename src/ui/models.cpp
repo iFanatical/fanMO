@@ -278,6 +278,54 @@ int PluginListModel::problemCount() const
     return n;
 }
 
+int PluginListModel::moveAfterMasters(const QList<int> &rows, QStringList *unfixable)
+{
+    const auto find = [this](const QString &name) {
+        for (size_t i = 0; i < m_rows.size(); ++i)
+            if (m_rows[i].name.compare(name, Qt::CaseInsensitive) == 0)
+                return int(i);
+        return -1;
+    };
+    QStringList queue;
+    for (int r : rows)
+        if (r >= 0 && r < int(m_rows.size()))
+            queue << m_rows[size_t(r)].name;
+
+    int moves = 0;
+    /* Plugins only ever move down, so this ends; the cap is a backstop. */
+    int budget = int(m_rows.size()) * 4 + 16;
+    beginResetModel();
+    while (!queue.isEmpty() && budget-- > 0) {
+        const QString name = queue.takeFirst();
+        const int at = find(name);
+        if (at < 0)
+            continue;
+        int last = -1;
+        for (const QString &master : std::as_const(m_rows[size_t(at)].missingMasters)) {
+            const int pos = find(master);
+            if (pos > at && m_rows[size_t(pos)].enabled) {
+                last = qMax(last, pos);
+            } else if (unfixable) {
+                const QString note = QStringLiteral("%1 needs %2").arg(name, master);
+                if (!unfixable->contains(note))
+                    *unfixable << note;
+            }
+        }
+        if (last < 0)
+            continue;
+        moveItems(m_rows, {at}, last + 1);
+        recompute();
+        ++moves;
+        for (const Row &other : m_rows)
+            if (other.missingMasters.contains(name, Qt::CaseInsensitive) && !queue.contains(other.name))
+                queue << other.name;
+    }
+    endResetModel();
+    if (moves)
+        emit orderChanged();
+    return moves;
+}
+
 void PluginListModel::setRows(std::vector<Row> rows)
 {
     beginResetModel();

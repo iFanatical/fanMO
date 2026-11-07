@@ -20,6 +20,10 @@ Wine. Windows tools still run, through the game's Proton prefix.
 - **Deployment**: hard links into `Data`, as a diff against the last run, so
   a reorder touches a handful of files. Folders that differ only by case
   merge into one spelling.
+- **Root mods**: SKSE, preloaders and other files that belong beside the game
+  go to the game folder, not `Data`. Collections mark these themselves; for an
+  archive you install yourself, fanMO recognises `skse64_loader.exe` and the
+  DLLs Windows loads from there, and says so in the log.
 - **Profiles**: separate mod lists and load orders, optionally separate saves
   and INIs.
 - **Tools**: anything run through Proton in the game's prefix. New files in
@@ -64,12 +68,23 @@ bar says so. Then either:
   `--game --game-path --auto-sort` and reads the result back when it exits. On
   deploy, the curator's rules are merged into LOOT's `userlist.yaml` in the
   prefix.
+  LOOT 0.29 needs one file Proton doesn't provide: copy Proton's
+  `files/lib/wine/x86_64-windows/icu.dll` into LOOT's program folder as
+  `icuuc.dll`, or LOOT exits at once with no window. If a sorter exits with an
+  error, or changes nothing, fanMO doesn't read the order back, and the log
+  says so; each tool's output is kept in `logs/` in the instance.
 - **Import an order.** Plugins tab, Import load order: any LOOT-sorted
   `loadorder.txt`. Plugins it doesn't list stay where they are, so a previous
   revision's order works for the next one.
 
 Updating a collection in a profile keeps the existing order for plugins it
-already knows, and asks for sorting again.
+already knows, and asks for sorting again. An imported order that loads a
+master after a plugin needing it also counts as unsorted.
+
+For a plugin flagged as missing masters, right-click, Move after its masters,
+puts it just below them, and takes along anything that move would leave above
+its own master. A master that isn't installed or is switched off is reported
+in the log instead: moving can't fix those.
 
 The userlist is shared with you: rules you add in LOOT stay. fanMO records what
 it added in `state/loot-userlist.json` and takes back only that, so a rule a new
@@ -129,5 +144,9 @@ with an existing Vortex install, which is how the installer was checked.
 - A FOMOD whose output depends on which plugins are active gets the state of
   the finished collection. Vortex uses whatever happened to be active at that
   moment, so the two can differ on such a mod.
+- Right-click, Deploy to game folder, covers a root mod fanMO didn't recognise.
+  It treats the mod's folder as the game folder and moves nothing, so a mod
+  installed with an extra folder around its files needs that folder removed.
+  FOMOD archives are never detected as root mods; they say where files go.
 - Hard links are real files: a tool that edits a deployed file in place edits
   the mod's copy. Vortex has this too. A tool that replaces the file is fine.

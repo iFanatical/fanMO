@@ -19,6 +19,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -34,6 +35,7 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QProgressBar>
+#include <QResizeEvent>
 #include <QPushButton>
 #include <QSettings>
 #include <QSplitter>
@@ -97,15 +99,21 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::buildUi()
 {
-    auto *bar = new QToolBar;
-    bar->setObjectName(QStringLiteral("toolbar"));
-    bar->setMovable(false);
-    bar->setFloatable(false);
-    addToolBar(bar);
+    /* Two bars, so a window too narrow for one row can wrap to two: tiled,
+     * that's most of the time. fitToolbars() decides. */
+    const auto makeBar = [this] {
+        auto *toolbar = new QToolBar;
+        toolbar->setObjectName(QStringLiteral("toolbar"));
+        toolbar->setMovable(false);
+        toolbar->setFloatable(false);
+        addToolBar(toolbar);
+        return toolbar;
+    };
+    auto *bar = makeBar();
+    m_mainBar = bar;
 
     bar->addWidget(new QLabel(QStringLiteral("Profile")));
     m_profileBox = new QComboBox;
-    m_profileBox->setMinimumWidth(220);
     bar->addWidget(m_profileBox);
     connect(m_profileBox, &QComboBox::textActivated, this, [this](const QString &name) {
         if (name != m_profile.name) {
@@ -144,13 +152,14 @@ void MainWindow::buildUi()
 
     bar->addWidget(new QLabel(QStringLiteral("Run")));
     m_toolBox = new QComboBox;
-    m_toolBox->setMinimumWidth(180);
     bar->addWidget(m_toolBox);
     m_runButton = new QPushButton(QStringLiteral("Run"));
     connect(m_runButton, &QPushButton::clicked, this, &MainWindow::runTool);
     bar->addWidget(m_runButton);
-    bar->addSeparator();
 
+    bar = makeBar();
+    m_actionBar = bar;
+    m_barGap = bar->addSeparator();
     bar->addAction(QStringLiteral("Install archive"), this, &MainWindow::chooseArchive);
     bar->addAction(QStringLiteral("Collection"), this, [this] { installCollection(); });
     bar->addAction(QStringLiteral("Wabbajack"), this, &MainWindow::installWabbajack);
@@ -208,6 +217,29 @@ void MainWindow::buildUi()
     m_cancelButton = new QPushButton(QStringLiteral("Cancel"));
     m_cancelButton->setVisible(false);
     statusBar()->addPermanentWidget(m_cancelButton);
+    fitToolbars();
+}
+
+void MainWindow::fitToolbars()
+{
+    const bool tight = width() < 760;
+    m_profileBox->setMinimumWidth(tight ? 120 : 220);
+    m_toolBox->setMinimumWidth(tight ? 100 : 180);
+
+    const bool oneRow = m_mainBar->sizeHint().width() + m_actionBar->sizeHint().width() <= width();
+    m_barGap->setVisible(oneRow);
+    if (oneRow == toolBarBreak(m_actionBar)) {
+        if (oneRow)
+            removeToolBarBreak(m_actionBar);
+        else
+            insertToolBarBreak(m_actionBar);
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    fitToolbars();
 }
 
 static QLineEdit *filterEdit(const QString &placeholder)
@@ -578,6 +610,20 @@ void MainWindow::scanFinished()
     m_plugins->setRows(std::move(scan.plugins));
     applyFilter(m_pluginView, m_pluginFilter->text());
     m_profile.plugins = std::move(scan.order);
+    /* An imported order is only as good as the file: if it puts masters after
+     * the plugins needing them, it still needs sorting. */
+    if (m_checkImportedOrder) {
+        m_checkImportedOrder = false;
+        if (const int problems = m_plugins->problemCount()) {
+            m_profile.needsSorting = true;
+            QString error;
+            if (!m_instance.saveProfile(m_profile, &error))
+                log(error);
+            log(QStringLiteral("the imported order loads masters after %1 plugin%2 needing them: run LOOT, "
+                               "or select them and use Move after its masters")
+                    .arg(problems).arg(problems == 1 ? "" : "s"));
+        }
+    }
     updateConflictPane();
     refreshOverwrite();
     updateStatus();
@@ -838,6 +884,28 @@ void MainWindow::purge()
     });
 }
 
+/* The load order files as they stand, to tell whether a sorter changed them. */
+static QByteArray orderSnapshot(const Instance &instance)
+{
+    QByteArray out;
+    const QDir dir(instance.appDataPath());
+    for (const QString &name : dir.entryList(QDir::Files, QDir::Name)) {
+        const QString key = name.toLower();
+        if (key != QLatin1String("plugins.txt") && key != QLatin1String("loadorder.txt"))
+            continue;
+        QFile f(dir.filePath(name));
+        if (f.open(QIODevice::ReadOnly))
+            out += key.toUtf8() + '\n' + f.readAll() + '\n';
+    }
+    return out;
+}
+
+static QString duration(qint64 ms)
+{
+    return ms < 60000 ? QStringLiteral("%1 s").arg(double(ms) / 1000.0, 0, 'f', 1)
+                      : QStringLiteral("%1 min %2 s").arg(ms / 60000).arg((ms / 1000) % 60);
+}
+
 void MainWindow::runTool()
 {
     if (busy() || m_tool || !m_hasInstance)
@@ -855,17 +923,38 @@ void MainWindow::runTool()
             QMessageBox::warning(this, QStringLiteral("Can't run %1").arg(tool.name), error);
             return;
         }
+        /* What the tool and Proton print goes to a file, not to memory: a game
+         * session can print a great deal. */
+        const QString logDir = m_instance.root() + QStringLiteral("/logs");
+        QDir().mkpath(logDir);
+        const QString logFile = logDir + QLatin1Char('/') + Util::safeFolderName(tool.name) + QStringLiteral(".log");
+        process->setProcessChannelMode(QProcess::MergedChannels);
+        process->setStandardOutputFile(logFile);
+        const QByteArray before = tool.syncPlugins ? orderSnapshot(m_instance) : QByteArray();
+        auto timer = std::make_shared<QElapsedTimer>();
+
         m_tool = process;
         m_runButton->setEnabled(false);
         m_runButton->setText(QStringLiteral("Running…"));
         log(QStringLiteral("running %1").arg(tool.name));
-        connect(process, &QProcess::finished, this, [this, tool, process] {
+        const auto done = [this, process] {
             process->deleteLater();
             m_tool = nullptr;
             m_runButton->setEnabled(true);
             m_runButton->setText(QStringLiteral("Run"));
-            toolFinished(tool);
+        };
+        connect(process, &QProcess::finished, this,
+                [this, tool, before, logFile, timer, done](int code, QProcess::ExitStatus status) {
+            done();
+            toolFinished(tool, code, status == QProcess::CrashExit, timer->elapsed(), before, logFile);
         });
+        connect(process, &QProcess::errorOccurred, this, [this, tool, done](QProcess::ProcessError e) {
+            if (e != QProcess::FailedToStart)
+                return;
+            done();
+            log(QStringLiteral("%1 didn't start: Proton couldn't be run").arg(tool.name));
+        });
+        timer->start();
         process->start();
     };
 
@@ -883,9 +972,30 @@ void MainWindow::runTool()
     launch();
 }
 
-void MainWindow::toolFinished(const Tool &tool)
+void MainWindow::toolFinished(const Tool &tool, int exitCode, bool crashed, qint64 ms,
+                              const QByteArray &orderBefore, const QString &logFile)
 {
-    log(QStringLiteral("%1 finished").arg(tool.name));
+    const bool failed = crashed || exitCode != 0;
+    if (failed) {
+        log(crashed ? QStringLiteral("%1 crashed after %2").arg(tool.name, duration(ms))
+                    : QStringLiteral("%1 exited with code %2 after %3").arg(tool.name).arg(exitCode).arg(duration(ms)));
+        /* The likeliest explanation is near the end: a missing DLL, say. */
+        QFile f(logFile);
+        if (f.open(QIODevice::ReadOnly)) {
+            QStringList lines;
+            for (const QByteArray &raw : f.readAll().split('\n')) {
+                const QString line = QString::fromUtf8(raw).trimmed();
+                if (line.contains(QLatin1String("err:")) || line.contains(QLatin1String("not found"),
+                                                                             Qt::CaseInsensitive))
+                    lines << line;
+            }
+            for (const QString &line : lines.mid(qMax(0, int(lines.size()) - 4)))
+                log(QStringLiteral("  %1").arg(line.left(200)));
+        }
+        log(QStringLiteral("  full output: %1").arg(logFile));
+    } else {
+        log(QStringLiteral("%1 finished after %2").arg(tool.name, duration(ms)));
+    }
     QString error;
     const QStringList created = Deploy::unmanagedFiles(m_instance);
     if (!created.isEmpty()) {
@@ -909,7 +1019,14 @@ void MainWindow::toolFinished(const Tool &tool)
         }
         setDirty(true);
     }
-    if (tool.syncPlugins) {
+    /* Reading the order back marks it sorted, so it has to be a real result. */
+    if (tool.syncPlugins && failed) {
+        log(QStringLiteral("load order not read back: %1 didn't finish cleanly, so nothing it did can be trusted")
+                .arg(tool.name));
+    } else if (tool.syncPlugins && orderSnapshot(m_instance) == orderBefore) {
+        log(QStringLiteral("%1 didn't change the load order. If it should have sorted, run it without "
+                           "--auto-sort to see what it says").arg(tool.name));
+    } else if (tool.syncPlugins) {
         if (Plugins::read(m_instance, &m_profile, &error)) {
             log(QStringLiteral("load order read back from %1").arg(tool.name));
             m_instance.saveProfile(m_profile, &error);
@@ -940,6 +1057,7 @@ void MainWindow::importLoadOrder()
     storeProfile();
     const int known = Plugins::adoptOrder(&m_profile, reference);
     m_profile.needsSorting = false;
+    m_checkImportedOrder = true;
     if (!m_instance.saveProfile(m_profile, &error))
         log(error);
     log(QStringLiteral("load order: %1 of %2 plugins placed from %3")
@@ -984,20 +1102,24 @@ void MainWindow::installArchive(const QString &path)
         }
         Instance *instance = &m_instance;
         auto folder = std::make_shared<QString>();
+        auto notes = std::make_shared<QStringList>();
         ModInfo meta;
         meta.name = QFileInfo(path).completeBaseName();
         auto *install = new Job(QStringLiteral("Installing"), [=](const Engine::Callbacks &, QString *err) {
-            return Engine::installPrepared(*instance, *prepared, meta, preset, env, folder.get(), nullptr, err);
+            return Engine::installPrepared(*instance, *prepared, meta, preset, env, folder.get(), notes.get(), err);
         }, this);
-        startJob(QStringLiteral("Installing %1").arg(meta.name), install, [this, folder](bool done, const QString &err) {
+        startJob(QStringLiteral("Installing %1").arg(meta.name), install, [this, folder, notes](bool done, const QString &err) {
             if (!done) {
                 QMessageBox::warning(this, QStringLiteral("Can't install"), err);
                 return;
             }
+            for (const QString &note : std::as_const(*notes))
+                log(note);
             storeProfile();
             m_profile.mods.push_back({*folder, true});
             QString ignored;
             m_instance.saveProfile(m_profile, &ignored);
+            fillTools();
             showRows();
             setDirty(true);
             scheduleRescan();
@@ -1219,6 +1341,22 @@ void MainWindow::modMenu(const QPoint &pos)
         });
     }
     menu.addAction(QStringLiteral("Show conflicts"), this, [this] { m_tabs->setCurrentIndex(1); });
+    if (rows.size() == 1 && info != m_instance.mods().constEnd()) {
+        const QString key = row.folder;
+        QAction *root = menu.addAction(QStringLiteral("Deploy to game folder"));
+        root->setCheckable(true);
+        root->setChecked(info->rootDeploy);
+        root->setEnabled(!busy());
+        root->setToolTip(QStringLiteral("Treat this mod's folder as the game folder instead of Data"));
+        connect(root, &QAction::toggled, this, [this, key](bool on) {
+            m_instance.mods()[key].rootDeploy = on;
+            QString error;
+            if (!m_instance.save(&error))
+                log(error);
+            setDirty(true);
+            scheduleRescan();
+        });
+    }
     menu.addSeparator();
     menu.addAction(rows.size() == 1 ? QStringLiteral("Remove mod…") : QStringLiteral("Remove %1 mods…").arg(rows.size()),
                    this, [this, rows] { removeMods(rows); });
@@ -1236,6 +1374,18 @@ void MainWindow::pluginMenu(const QPoint &pos)
     menu.addSeparator();
     menu.addAction(QStringLiteral("Move to top"), this, [this, rows] { m_plugins->moveRowsTo(rows, 0); });
     menu.addAction(QStringLiteral("Move to bottom"), this, [this, rows] { m_plugins->moveRowsTo(rows, m_plugins->rowCount()); });
+    bool late = false;
+    for (int r : rows)
+        late = late || !m_plugins->rows()[size_t(r)].missingMasters.isEmpty();
+    QAction *after = menu.addAction(QStringLiteral("Move after its masters"), this, [this, rows] {
+        QStringList unfixable;
+        const int moved = m_plugins->moveAfterMasters(rows, &unfixable);
+        log(QStringLiteral("moved %1 plugin%2 below %3 masters").arg(moved).arg(moved == 1 ? "" : "s")
+                .arg(moved == 1 ? QStringLiteral("its") : QStringLiteral("their")));
+        for (const QString &note : std::as_const(unfixable))
+            log(QStringLiteral("can't fix by moving, the master is missing or off: %1").arg(note));
+    });
+    after->setEnabled(late && !busy());
     menu.exec(m_pluginView->viewport()->mapToGlobal(pos));
 }
 

@@ -10,6 +10,9 @@
 #include "ui/style.h"
 
 #include <QApplication>
+#include <QTabWidget>
+#include <QPlainTextEdit>
+#include <QComboBox>
 #include <QCheckBox>
 #include <QDir>
 #include <QElapsedTimer>
@@ -153,6 +156,62 @@ static void testPluginIndex()
     EQ(m.problemCount(), 0);
 }
 
+static void testMoveAfterMasters()
+{
+    const auto row = [](const char *name, QStringList masters = {}, bool enabled = true) {
+        PluginListModel::Row r;
+        r.name = QLatin1String(name);
+        r.masters = std::move(masters);
+        r.enabled = enabled;
+        return r;
+    };
+    const auto order = [](const PluginListModel &m) {
+        QStringList out;
+        for (const auto &r : m.rows())
+            out << r.name;
+        return out;
+    };
+    PluginListModel m;
+    /* The SRC chain from a real list: fixing one plugin used to break the next. */
+    m.setRows({row("Skyrim.esm"),
+               row("AIO.esp", {QStringLiteral("ers.ESP")}),
+               row("AIO Patch.esp", {QStringLiteral("AIO.esp")}),
+               row("Unrelated.esp"),
+               row("ERS.esp", {QStringLiteral("Timing.esp")}),
+               row("Timing.esp"),
+               row("Needs Absent.esp", {QStringLiteral("Absent.esp")}),
+               row("Needs Off.esp", {QStringLiteral("Off.esp")}),
+               row("Off.esp", {}, false)});
+    int changed = 0;
+    QObject::connect(&m, &OrderedModel::orderChanged, [&] { ++changed; });
+    /* AIO Patch is fine for now: it is the move that would break it. */
+    EQ(m.problemCount(), 4);
+
+    QStringList unfixable;
+    EQ(m.moveAfterMasters({4}, &unfixable), 3);
+    EQ(order(m), (QStringList{"Skyrim.esm", "Unrelated.esp", "Timing.esp", "ERS.esp", "AIO.esp", "AIO Patch.esp",
+                              "Needs Absent.esp", "Needs Off.esp", "Off.esp"}));
+    EQ(m.problemCount(), 2);
+    CHECK(unfixable.isEmpty());
+    EQ(changed, 1);
+
+    /* Nothing to do: no move, and nothing to deploy. */
+    EQ(m.moveAfterMasters({4}), 0);
+    EQ(changed, 1);
+
+    /* Moving can't fix a master that isn't there or isn't on. */
+    EQ(m.moveAfterMasters({6, 7}, &unfixable), 0);
+    EQ(unfixable, (QStringList{"Needs Absent.esp needs Absent.esp", "Needs Off.esp needs Off.esp"}));
+    EQ(m.problemCount(), 2);
+
+    /* Several at once, in any selection order. */
+    m.setRows({row("C.esp", {QStringLiteral("B.esp")}), row("B.esp", {QStringLiteral("A.esp")}), row("A.esp")});
+    /* C first (below B), then B (below A), which leaves C above B: C again. */
+    EQ(m.moveAfterMasters({0, 1}), 3);
+    EQ(order(m), (QStringList{"A.esp", "B.esp", "C.esp"}));
+    EQ(m.problemCount(), 0);
+}
+
 static const char *wizardXml = R"(<config>
   <moduleName>Test</moduleName>
   <installSteps order="Explicit">
@@ -255,6 +314,126 @@ static void waitFor(const std::function<bool()> &done, int ms = 20000)
         QApplication::processEvents(QEventLoop::AllEvents, 20);
 }
 
+/* Every toolbar control has to be on screen at the given size: a tiled window
+ * is often far narrower than the one the toolbar was laid out for. */
+static void checkToolbarFits(QMainWindow &window, int width, int height)
+{
+    window.resize(width, height);
+    QCoreApplication::processEvents();
+    QCoreApplication::processEvents();
+    for (const char *text : {"Deploy", "Run", "Install archive", "Collection", "Wabbajack", "Game", "Settings"}) {
+        QAbstractButton *b = button(&window, QLatin1String(text));
+        ++checks;
+        const bool shown = b && b->isVisible() && b->width() > 0
+            && b->mapTo(&window, QPoint(b->width(), 0)).x() <= window.width();
+        if (!shown) {
+            ++failures;
+            std::printf("  FAIL %s isn't reachable at %dx%d\n", text, width, height);
+        }
+    }
+}
+
+/* A sorter that fails must not leave the list marked as sorted, and the log
+ * has to say why: LOOT under Proton once died in a second, silently. */
+static void testToolRun()
+{
+    QTemporaryDir tmp;
+    const QString game = tmp.path() + QStringLiteral("/game");
+    const QString root = tmp.path() + QStringLiteral("/inst");
+    put(game + QStringLiteral("/SkyrimSE.exe"), "x");
+    put(game + QStringLiteral("/Data/Skyrim.esm"), "TES4");
+    QDir().mkpath(tmp.path() + QStringLiteral("/compat/pfx"));
+    const QString proton = tmp.path() + QStringLiteral("/proton");
+    /* Stands in for Proton: does whatever FAKE_TOOL says. */
+    put(proton, "#!/bin/sh\n"
+                "case \"$FAKE_TOOL\" in\n"
+                "  fail) echo 'err:module:import_dll Library icuuc.dll not found'; exit 53 ;;\n"
+                "  idle) exit 0 ;;\n"
+                "  sort) printf '*b.esp\\n*a.esp\\n' > \"$FAKE_PLUGINS\"; exit 0 ;;\n"
+                "esac\n");
+    QFile::setPermissions(proton, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    QString error;
+    CHECK(Instance::create(root, game, tmp.path() + QStringLiteral("/compat"), proton, &error));
+    Instance inst;
+    CHECK(inst.load(root, &error));
+    put(tmp.path() + QStringLiteral("/sorter.exe"), "exe");
+    Tool sorter;
+    sorter.name = QStringLiteral("Sorter");
+    sorter.exe = tmp.path() + QStringLiteral("/sorter.exe");
+    sorter.syncPlugins = true;
+    inst.tools().push_back(sorter);
+    put(inst.modsPath() + QStringLiteral("/m/a.esp"), "TES4");
+    put(inst.modsPath() + QStringLiteral("/m/b.esp"), "TES4");
+    ModInfo m;
+    m.folder = m.name = QStringLiteral("m");
+    inst.mods().insert(m.folder, m);
+    CHECK(inst.save(&error));
+    Profile profile;
+    CHECK(inst.loadProfile(QStringLiteral("Default"), &profile, &error));
+    profile.mods.push_back({QStringLiteral("m"), true});
+    profile.needsSorting = true;
+    CHECK(inst.saveProfile(profile, &error));
+    qputenv("FAKE_PLUGINS", QFile::encodeName(inst.appDataPath() + QStringLiteral("/Plugins.txt")));
+
+    MainWindow window;
+    CHECK(window.openInstance(root));
+    window.show();
+    window.waitForScan();
+    QComboBox *tools = nullptr;
+    for (QComboBox *c : window.findChildren<QComboBox *>())
+        if (c->findText(QStringLiteral("Sorter")) >= 0)
+            tools = c;
+    CHECK(tools);
+    if (!tools)
+        return;
+    tools->setCurrentIndex(tools->findText(QStringLiteral("Sorter")));
+    QPlainTextEdit *logView = nullptr;
+    for (QTabWidget *tabs : window.findChildren<QTabWidget *>())
+        for (int i = 0; i < tabs->count(); ++i)
+            if (tabs->tabText(i) == QStringLiteral("Log"))
+                logView = qobject_cast<QPlainTextEdit *>(tabs->widget(i));
+    CHECK(logView);
+    if (!logView)
+        return;
+    const auto run = [&](const char *mode) {
+        qputenv("FAKE_TOOL", mode);
+        logView->clear();
+        QAbstractButton *runButton = button(&window, QStringLiteral("Run"));
+        CHECK(runButton);
+        if (!runButton)
+            return QString();
+        runButton->click();
+        waitFor([&] { return logView->toPlainText().contains(QStringLiteral("Sorter ")) && runButton->isEnabled()
+                             && runButton->text() == QStringLiteral("Run"); });
+        window.waitForScan();
+        return logView->toPlainText();
+    };
+    const auto sorted = [&] {
+        Profile p;
+        QString e;
+        inst.loadProfile(QStringLiteral("Default"), &p, &e);
+        return !p.needsSorting;
+    };
+
+    QString text = run("fail");
+    CHECK(text.contains(QStringLiteral("Sorter exited with code 53")));
+    CHECK(text.contains(QStringLiteral("icuuc.dll not found")));
+    CHECK(text.contains(QStringLiteral("load order not read back")));
+    CHECK(QFileInfo::exists(root + QStringLiteral("/logs/Sorter.log")));
+    CHECK(!sorted());
+
+    text = run("idle");
+    CHECK(text.contains(QStringLiteral("Sorter finished after")));
+    CHECK(text.contains(QStringLiteral("didn't change the load order")));
+    CHECK(!sorted());
+
+    text = run("sort");
+    CHECK(text.contains(QStringLiteral("load order read back from Sorter")));
+    CHECK(sorted());
+    if (!text.contains(QStringLiteral("read back")))
+        std::printf("    log was: %s\n", qPrintable(text.left(600)));
+}
+
 static void testWindow()
 {
     QTemporaryDir tmp;
@@ -285,6 +464,14 @@ static void testWindow()
     CHECK(window.openInstance(root));
     window.show();
     window.waitForScan();
+
+    /* The two sizes from a real tiled Hyprland window, then tighter still. */
+    checkToolbarFits(window, 957, 441);
+    checkToolbarFits(window, 950, 516);
+    checkToolbarFits(window, 760, 500);
+    checkToolbarFits(window, 620, 500);
+    checkToolbarFits(window, 1578, 900);
+    checkToolbarFits(window, 2560, 1000);
 
     auto *deploy = static_cast<QPushButton *>(button(&window, QStringLiteral("Deploy")));
     CHECK(deploy);
@@ -360,7 +547,7 @@ int main(int argc, char *argv[])
 
     const struct { const char *name; void (*fn)(); } tests[] = {
         {"reorder", testReorder}, {"plugin index", testPluginIndex},
-        {"fomod wizard", testWizard}, {"main window", testWindow},
+        {"move after masters", testMoveAfterMasters}, {"fomod wizard", testWizard}, {"main window", testWindow}, {"tool run", testToolRun},
     };
     for (const auto &t : tests) {
         const int before = failures;

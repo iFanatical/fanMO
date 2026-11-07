@@ -368,6 +368,42 @@ static void testPathPrefix()
 
 /* --- installing a tree ------------------------------------------------ */
 
+static void testRootDetection()
+{
+    using Installer::isRootMod;
+    const auto files = [](std::initializer_list<const char *> names) {
+        QStringList list;
+        for (const char *n : names)
+            list << QLatin1String(n);
+        return list;
+    };
+    /* SKSE as Nexus ships it, and with no wrapper folder. */
+    CHECK(isRootMod(files({"skse64_2_02_06/skse64_loader.exe", "skse64_2_02_06/skse64_1_6_1170.dll",
+                           "skse64_2_02_06/Data/Scripts/actor.pex", "skse64_2_02_06/src/common/x.h"})));
+    CHECK(isRootMod(files({"SKSE64_LOADER.EXE", "Data/Scripts/actor.pex"})));
+    /* Windows loads these from beside the game. */
+    CHECK(isRootMod(files({"d3dx9_42.dll"})));
+    CHECK(isRootMod(files({"D3D11.dll", "enbseries.ini"})));
+    CHECK(isRootMod(files({"WrapperVersion/d3d11.dll", "ReadMe.txt"})));
+    CHECK(isRootMod(files({"version.dll", "SkyrimRuntimeSwapper.exe", "Data/Patches/a.hdiff"})));
+
+    /* Ordinary mods, including those that look a little like the above. */
+    CHECK(!isRootMod(files({"Mod.esp", "textures/a.dds"})));
+    CHECK(!isRootMod(files({"SKSE/Plugins/EngineFixes.dll", "SKSE/Plugins/EngineFixes.toml"})));
+    CHECK(!isRootMod(files({"Data/SKSE/Plugins/version.dll"})));
+    CHECK(!isRootMod(files({"Mod/SKSE/Plugins/dxgi.dll"})));
+    CHECK(!isRootMod(files({"MyPlugin.dll", "readme.txt"})));
+    CHECK(!isRootMod(files({"CalienteTools/BodySlide/BodySlide.exe", "meshes/a.nif"})));
+    /* A program with game content sits in Data; so does one with no marker. */
+    CHECK(!isRootMod(files({"Patcher.exe", "meshes/a.nif", "Mod.esp"})));
+    CHECK(!isRootMod(files({"Nemesis Unlimited Behavior Engine.exe", "Nemesis_Engine/a.txt"})));
+    /* A proxy DLL beside loose game content isn't a root mod either. */
+    CHECK(!isRootMod(files({"version.dll", "Mod.esp"})));
+    /* Too deep to be a wrapper folder around a root mod. */
+    CHECK(!isRootMod(files({"a/b/dxgi.dll"})));
+    CHECK(!isRootMod({}));
+}
+
 static void testInstallerApply()
 {
     QTemporaryDir tmp;
@@ -807,6 +843,89 @@ static void testDeployRootMod()
     EQ(snapshot(s.game), before);
 }
 
+/* SKSE deploys to the game folder but carries a Data/ of its own: those files
+ * are ordinary Data, and have to layer with everything else that's there. */
+static void testDeployRootModData()
+{
+    Sandbox s;
+    s.addMod(QStringLiteral("below"), {{QStringLiteral("Scripts/shared.pex"), "below"}});
+    s.addMod(QStringLiteral("skse"), {{QStringLiteral("skse64_loader.exe"), "loader"},
+                                      {QStringLiteral("Data/Scripts/shared.pex"), "skse"},
+                                      {QStringLiteral("Data/Scripts/game.pex"), "skse"},
+                                      {QStringLiteral("Data/Scripts/top.pex"), "skse"}}, true);
+    s.addMod(QStringLiteral("above"), {{QStringLiteral("scripts/TOP.pex"), "above"}});
+    Deploy::Report report;
+    CHECK(s.deploy(&report));
+    EQ(report.linked, 4);
+    EQ(slurp(s.game + QStringLiteral("/skse64_loader.exe")), QByteArray("loader"));
+    /* Priority decides, across both kinds of mod, in either direction. */
+    EQ(slurp(s.data(QStringLiteral("Scripts/shared.pex"))), QByteArray("skse"));
+    EQ(slurp(s.data(QStringLiteral("Scripts/game.pex"))), QByteArray("skse"));
+    /* The winner's own spelling, and only one file for the two of them. */
+    EQ(slurp(s.data(QStringLiteral("Scripts/TOP.pex"))), QByteArray("above"));
+    CHECK(!QFileInfo::exists(s.data(QStringLiteral("Scripts/top.pex"))));
+
+    /* Running a tool must not mistake any of it for something the tool made. */
+    CHECK(Deploy::unmanagedFiles(s.inst).isEmpty());
+    Deploy::Report second;
+    CHECK(s.deploy(&second));
+    EQ(second.linked, 0);
+    EQ(second.removed, 0);
+    EQ(second.captured, 0);
+    EQ(second.unchanged, 4);
+
+    /* The index agrees: one conflict per real path, not two unrelated files. */
+    const Deploy::FileIndex index = Deploy::buildIndex(Deploy::layersFor(s.inst, s.profile));
+    EQ(index.providers.size(), qsizetype(4));
+    int skseLayer = -1;
+    for (size_t i = 0; i < index.layers.size(); ++i)
+        if (index.layers[i].id == QStringLiteral("skse"))
+            skseLayer = int(i);
+    EQ(index.summary[size_t(skseLayer)].total, 4);
+    EQ(index.summary[size_t(skseLayer)].losing, 1);
+    EQ(index.summary[size_t(skseLayer)].winning, 1);
+
+    Deploy::Report purged;
+    QString error;
+    CHECK(Deploy::purge(s.inst, {}, &purged, &error));
+    CHECK(!QFileInfo::exists(s.data(QStringLiteral("Scripts/game.pex"))));
+    CHECK(!QFileInfo::exists(s.game + QStringLiteral("/skse64_loader.exe")));
+}
+
+/* A deployment from before that fix records those files as root entries. */
+static void testDeployRootDataMigration()
+{
+    Sandbox s;
+    s.addMod(QStringLiteral("skse"), {{QStringLiteral("skse64_loader.exe"), "loader"},
+                                      {QStringLiteral("Data/Scripts/game.pex"), "skse"}}, true);
+    CHECK(s.deploy());
+    const QString state = s.inst.statePath() + QStringLiteral("/deployment.json");
+    QJsonObject manifest = Util::readJson(state).object();
+    QJsonArray files = manifest.value(QLatin1String("files")).toArray();
+    for (qsizetype i = 0; i < files.size(); ++i) {
+        QJsonArray entry = files.at(i).toArray();
+        if (entry.at(0).toString().endsWith(QLatin1String("game.pex"))) {
+            entry[0] = QStringLiteral("Data/Scripts/game.pex");
+            entry[3] = true;
+            files[i] = entry;
+        }
+    }
+    manifest.insert(QStringLiteral("files"), files);
+    CHECK(Util::writeJson(state, QJsonDocument(manifest)));
+
+    /* Known, so a tool finishing leaves it alone even before the next deploy. */
+    CHECK(Deploy::unmanagedFiles(s.inst).isEmpty());
+    Deploy::Report report;
+    CHECK(s.deploy(&report));
+    EQ(report.captured, 0);
+    EQ(slurp(s.data(QStringLiteral("Scripts/game.pex"))), QByteArray("skse"));
+    EQ(slurp(s.game + QStringLiteral("/skse64_loader.exe")), QByteArray("loader"));
+    Deploy::Report steady;
+    CHECK(s.deploy(&steady));
+    EQ(steady.linked, 0);
+    EQ(steady.removed, 0);
+}
+
 static void testDeployRefusals()
 {
     /* Vortex's links here are not ours to displace. */
@@ -1195,6 +1314,74 @@ static void testCollectionFlow()
     EQ(int(fourth.manual.size()), 1);
     EQ(fourth.manual[0].name, QStringLiteral("Ghost"));
     CHECK(!fourth.complete());
+}
+
+/* A download you install yourself has no collection to say where it goes. */
+static void testSingleRootInstall()
+{
+    if (Archive::sevenZip().isEmpty())
+        return;
+    Sandbox s;
+    QTemporaryDir arch;
+    QString error;
+    const QString skse = arch.path() + QStringLiteral("/skse");
+    put(skse + QStringLiteral("/skse64_2_02_06/skse64_loader.exe"), "loader");
+    put(skse + QStringLiteral("/skse64_2_02_06/skse64_1_6_1170.dll"), "runtime");
+    put(skse + QStringLiteral("/skse64_2_02_06/Data/Scripts/actor.pex"), "script");
+    make7z(skse, arch.path() + QStringLiteral("/skse.7z"));
+    const QString plain = arch.path() + QStringLiteral("/plain");
+    put(plain + QStringLiteral("/Plain Mod/Plain.esp"), pluginBytes(0, {}));
+    put(plain + QStringLiteral("/Plain Mod/SKSE/Plugins/plain.dll"), "plugin");
+    make7z(plain, arch.path() + QStringLiteral("/plain.7z"));
+    const QString swapper = arch.path() + QStringLiteral("/swapper");
+    put(swapper + QStringLiteral("/version.dll"), "proxy");
+    put(swapper + QStringLiteral("/SkyrimRuntimeSwapper.exe"), "tool");
+    make7z(swapper, arch.path() + QStringLiteral("/swapper.7z"));
+
+    const auto install = [&](const QString &file, const QString &name, QStringList *warnings) {
+        Engine::Prepared prepared;
+        CHECK(Engine::prepareArchive(s.inst, arch.path() + QLatin1Char('/') + file, &prepared, &error));
+        ModInfo meta;
+        meta.name = name;
+        QString folder;
+        CHECK(Engine::installPrepared(s.inst, prepared, meta, std::nullopt, Fomod::Environment{}, &folder, warnings, &error));
+        s.profile.mods.push_back({folder, true});
+        return folder;
+    };
+    QStringList skseNotes, plainNotes, swapperNotes;
+    const QString sksePath = install(QStringLiteral("skse.7z"), QStringLiteral("SKSE"), &skseNotes);
+    const QString plainPath = install(QStringLiteral("plain.7z"), QStringLiteral("Plain"), &plainNotes);
+    const QString swapperPath = install(QStringLiteral("swapper.7z"), QStringLiteral("Swapper"), &swapperNotes);
+    CHECK(s.inst.mods().value(sksePath).rootDeploy);
+    CHECK(!s.inst.mods().value(plainPath).rootDeploy);
+    CHECK(s.inst.mods().value(swapperPath).rootDeploy);
+    /* It says so, since this decides where the files end up. */
+    EQ(skseNotes.size(), qsizetype(1));
+    CHECK(skseNotes.front().contains(QStringLiteral("game folder")));
+    CHECK(plainNotes.isEmpty());
+
+    /* The Swapper's program joins the tool list; SKSE's is there already. */
+    int swappers = 0, loaders = 0;
+    for (const Tool &tool : s.inst.tools()) {
+        swappers += tool.exe == QStringLiteral("SkyrimRuntimeSwapper.exe");
+        loaders += tool.exe.compare(QStringLiteral("skse64_loader.exe"), Qt::CaseInsensitive) == 0;
+    }
+    EQ(swappers, 1);
+    EQ(loaders, 1);
+
+    CHECK(s.inst.save(&error));
+    CHECK(s.inst.saveProfile(s.profile, &error));
+    CHECK(s.deploy());
+    CHECK(QFileInfo::exists(s.game + QStringLiteral("/skse64_loader.exe")));
+    CHECK(QFileInfo::exists(s.game + QStringLiteral("/skse64_1_6_1170.dll")));
+    CHECK(QFileInfo::exists(s.game + QStringLiteral("/version.dll")));
+    CHECK(QFileInfo::exists(s.data(QStringLiteral("Scripts/actor.pex"))));
+    CHECK(!QFileInfo::exists(s.game + QStringLiteral("/Data/Data")));
+    CHECK(!QFileInfo::exists(s.data(QStringLiteral("skse64_loader.exe"))));
+    CHECK(!QFileInfo::exists(s.data(QStringLiteral("skse64_2_02_06"))));
+    /* And an ordinary mod beside them is untouched by any of it. */
+    CHECK(QFileInfo::exists(s.data(QStringLiteral("Plain.esp"))));
+    CHECK(QFileInfo::exists(s.data(QStringLiteral("SKSE/Plugins/plain.dll"))));
 }
 
 static void testProfiles()
@@ -1595,17 +1782,18 @@ int main(int argc, char *argv[])
     QCoreApplication app(argc, argv);
     const struct { const char *name; void (*fn)(); } tests[] = {
         {"paths", testPaths}, {"bsdiff", testBsdiff}, {"octodiff", testOctodiff},
-        {"hashes", testHashes}, {"fomod", testFomod}, {"path prefix", testPathPrefix},
+        {"hashes", testHashes}, {"fomod", testFomod}, {"path prefix", testPathPrefix}, {"root detection", testRootDetection},
         {"installer apply", testInstallerApply}, {"backslash names", testBackslashNames}, {"archive safety", testArchiveSafety},
         {"collection", testCollection}, {"deploy basics", testDeployBasics},
         {"deploy case merging", testDeployCaseMerging}, {"deploy backups", testDeployBackups},
         {"deploy rewritten file", testDeployRewrittenFile}, {"deploy reinstalled mod", testDeployReinstalledMod},
         {"deploy unmanaged", testDeployUnmanaged},
-        {"deploy root mod", testDeployRootMod}, {"deploy refusals", testDeployRefusals},
+        {"deploy root mod", testDeployRootMod}, {"deploy root mod data", testDeployRootModData},
+        {"deploy root data migration", testDeployRootDataMigration}, {"deploy refusals", testDeployRefusals},
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm},
     };
     for (const auto &t : tests) {
         const int before = failures;

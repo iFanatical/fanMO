@@ -526,6 +526,9 @@ bool installPrepared(Instance &instance, const Prepared &prepared, const ModInfo
     request.extractedDir = prepared.extractedDir;
     request.preset = preset;
     request.env = env;
+    /* A FOMOD says where its own files go. */
+    request.rootDeploy = meta.rootDeploy
+        || (!prepared.isFomod && Installer::isRootMod(Util::walkFiles(prepared.extractedDir)));
     Installer::Plan plan = Installer::plan(request);
     if (!plan.ok()) {
         *error = plan.error;
@@ -547,10 +550,14 @@ bool installPrepared(Instance &instance, const Prepared &prepared, const ModInfo
         info.name = QFileInfo(prepared.archive).completeBaseName();
     info.archive = QFileInfo(prepared.archive).fileName();
     info.installed = QDateTime::currentSecsSinceEpoch();
+    info.rootDeploy = request.rootDeploy;
+    if (request.rootDeploy && warnings)
+        *warnings << QStringLiteral("%1 deploys to the game folder, not Data").arg(info.name);
     if (preset)
         info.choices = QJsonObject{{QStringLiteral("type"), QStringLiteral("fomod")},
                                    {QStringLiteral("options"), Fomod::presetToJson(*preset)}};
     instance.mods().insert(folder, info);
+    addRootTools(instance, {folder});
     if (folderOut)
         *folderOut = folder;
     return instance.save(error);

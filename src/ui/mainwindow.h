@@ -23,6 +23,7 @@ class QProcess;
 class QPushButton;
 class QTabWidget;
 class QTimer;
+class QToolBar;
 class QTreeView;
 class QTreeWidget;
 
@@ -43,6 +44,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     struct Scan {
@@ -63,6 +65,7 @@ private:
     void loadProfile(const QString &name);
     void fillProfiles();
     void fillTools();
+    void fitToolbars();
     void showRows();
     void storeProfile();
     void scheduleRescan();
@@ -82,7 +85,8 @@ private:
     void deploy();
     void purge();
     void runTool();
-    void toolFinished(const Tool &tool);
+    void toolFinished(const Tool &tool, int exitCode, bool crashed, qint64 ms, const QByteArray &orderBefore,
+                      const QString &logFile);
     void installArchive(const QString &path);
     void chooseArchive();
     void importLoadOrder();
@@ -111,6 +115,10 @@ private:
 
     QComboBox *m_profileBox;
     QComboBox *m_toolBox;
+    QToolBar *m_mainBar = nullptr;
+    QToolBar *m_actionBar = nullptr;
+    QAction *m_barGap = nullptr;
+    bool m_checkImportedOrder = false;
     QPushButton *m_deployButton;
     QPushButton *m_runButton;
     QAction *m_localSaves;

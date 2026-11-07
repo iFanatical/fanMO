@@ -37,6 +37,14 @@ static QString makeKey(bool root, const QString &relPath)
     return (root ? QStringLiteral("r/") : QStringLiteral("d/")) + Util::foldKey(relPath);
 }
 
+/* A root mod's Data/ is the game's Data, so what's in it layers by priority
+ * with every other mod's files there. Empty for anything else. */
+static QString dataPathOf(bool rootDeploy, const QString &relPath)
+{
+    static const QLatin1String prefix("data/");
+    return rootDeploy && relPath.startsWith(prefix, Qt::CaseInsensitive) ? relPath.mid(prefix.size()) : QString();
+}
+
 /* Mods carry things that aren't game data: FOMOD leftovers aren't filtered
  * (Vortex deploys them too), only our own and Vortex's markers are. */
 static bool ignoredFile(const QString &relPath)
@@ -69,7 +77,8 @@ FileIndex buildIndex(std::vector<Layer> layers)
         for (const QString &rel : lists[i]) {
             if (ignoredFile(rel))
                 continue;
-            index.providers[makeKey(root, rel)].push_back({i, rel});
+            const QString inData = dataPathOf(root, rel);
+            index.providers[inData.isEmpty() ? makeKey(root, rel) : makeKey(false, inData)].push_back({i, rel});
             ++index.summary[size_t(i)].total;
         }
     }
@@ -506,8 +515,10 @@ bool deploy(Instance &instance, const FileIndex &index, const Options &options, 
     for (auto it = index.providers.cbegin(); it != index.providers.cend(); ++it) {
         const FileIndex::Provider &top = it.value().back();
         const Layer &layer = index.layers[size_t(top.layer)];
-        next.insert(it.key(), Entry{top.relPath, layer.id,
-                                    layer.path + QLatin1Char('/') + top.relPath, layer.rootDeploy});
+        const QString inData = dataPathOf(layer.rootDeploy, top.relPath);
+        next.insert(it.key(), Entry{inData.isEmpty() ? top.relPath : inData, layer.id,
+                                    layer.path + QLatin1Char('/') + top.relPath,
+                                    layer.rootDeploy && inData.isEmpty()});
     }
     return applyDiff(instance, currentManifest(instance), next, options, report, error);
 }
@@ -525,9 +536,12 @@ QStringList unmanagedFiles(const Instance &instance)
     for (const auto &v : baseline)
         known.insert(v.toString());
     const Manifest m = currentManifest(instance);
-    for (const Entry &e : m.entries)
-        if (!e.root)
-            known.insert(Util::foldKey(e.rel));
+    for (const Entry &e : m.entries) {
+        /* Deployments made before root mods' Data merged list theirs as root. */
+        const QString inData = e.root ? dataPathOf(true, e.rel) : e.rel;
+        if (!inData.isEmpty())
+            known.insert(Util::foldKey(inData));
+    }
     QStringList out;
     for (const QString &f : Util::walkFiles(instance.dataPath()))
         if (!known.contains(Util::foldKey(f)))

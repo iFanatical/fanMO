@@ -32,6 +32,13 @@ QString pathPrefix(const QStringList &files);
 /* The folder holding a root mod's programs, shallowest first. */
 QString rootPrefix(const QStringList &files);
 
+/* Whether an archive with no installer belongs in the game folder, not Data.
+ * Collections say so themselves; a single download has only its files to go
+ * on. Deliberately narrow: over a full GTS install this finds exactly the
+ * three mods its curator marked, where "has a program in it" would also catch
+ * mods that are run from inside Data. */
+bool isRootMod(const QStringList &files);
+
 struct Request {
     QString extractedDir;
     std::optional<Fomod::Preset> preset; /* nullopt: defaults, or the wizard's choices */
