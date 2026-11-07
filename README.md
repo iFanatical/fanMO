@@ -62,14 +62,26 @@ bar says so. Then either:
 
 - **Run LOOT.** Add `LOOT.exe` in Settings: fanMO fills in
   `--game --game-path --auto-sort` and reads the result back when it exits. On
-  deploy, the curator's rules are copied to LOOT's `userlist.yaml` in the
-  prefix, keeping any existing list as `.fanmo-backup`.
+  deploy, the curator's rules are merged into LOOT's `userlist.yaml` in the
+  prefix.
 - **Import an order.** Plugins tab, Import load order: any LOOT-sorted
   `loadorder.txt`. Plugins it doesn't list stay where they are, so a previous
   revision's order works for the next one.
 
 Updating a collection in a profile keeps the existing order for plugins it
 already knows, and asks for sorting again.
+
+The userlist is shared with you: rules you add in LOOT stay. fanMO records what
+it added in `state/loot-userlist.json` and takes back only that, so a rule a new
+revision dropped goes away, and a profile without a collection gets your list
+back. Where you and a collection disagree on something with one answer, such as
+a plugin's group, yours stays and the deploy log says so. A rule of the
+curator's that you delete comes back on the next deploy; to override one, set
+your own value instead. The first version of your list is kept as
+`userlist.yaml.fanmo-backup`.
+
+If the list uses YAML that fanMO can't rewrite faithfully, such as anchors, it
+leaves the file alone and warns, and the collection's rules aren't added.
 
 ## How deployment stays safe
 
@@ -94,6 +106,8 @@ src/core/    no UI; everything testable headless
   engine       whole operations: install a collection, activate a profile
   deploy       hard links, manifest, conflicts, capture
   plugins      TES4 headers, Plugins.txt
+  userlist     merging a collection's rules into LOOT's userlist.yaml
+  yaml         the YAML reader and writer for it
   wabbajack    .wabbajack lists
   nexus        REST and GraphQL client, downloads
   steam, launcher  finding the game, running through Proton

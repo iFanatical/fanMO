@@ -350,6 +350,8 @@ static int deployCommand(QStringList args)
     say(QStringLiteral("%1 linked, %2 removed, %3 unchanged, %4 backed up, %5 restored, %6 captured, %7 ms")
             .arg(report.linked).arg(report.removed).arg(report.unchanged).arg(report.backedUp)
             .arg(report.restored).arg(report.captured).arg(timer.elapsed()));
+    for (const QString &warning : std::as_const(report.warnings))
+        say(QStringLiteral("warning: %1").arg(warning));
     return 0;
 }
 

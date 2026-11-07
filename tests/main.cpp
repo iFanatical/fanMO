@@ -12,14 +12,19 @@
 #include "core/patch.h"
 #include "core/plugins.h"
 #include "core/steam.h"
+#include "core/userlist.h"
 #include "core/util.h"
 #include "core/wabbajack.h"
+#include "core/yaml.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QDateTime>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
 #include <QTemporaryDir>
@@ -1107,7 +1112,10 @@ static void testCollectionFlow()
             {QStringLiteral("reference"), QJsonObject{{QStringLiteral("logicalFileName"), QStringLiteral("C")}}}}}},
         {QStringLiteral("plugins"), QJsonArray{
             QJsonObject{{QStringLiteral("name"), QStringLiteral("modb.esp")}, {QStringLiteral("enabled"), true}},
-            QJsonObject{{QStringLiteral("name"), QStringLiteral("moda.esp")}, {QStringLiteral("enabled"), false}}}}};
+            QJsonObject{{QStringLiteral("name"), QStringLiteral("moda.esp")}, {QStringLiteral("enabled"), false}}}},
+        {QStringLiteral("pluginRules"), QJsonObject{{QStringLiteral("plugins"), QJsonArray{QJsonObject{
+            {QStringLiteral("name"), QStringLiteral("moda.esp")},
+            {QStringLiteral("group"), QStringLiteral("Curated Group")}}}}}}};
     Util::writeJson(bundle + QStringLiteral("/collection.json"), QJsonDocument(root));
 
     Collection::Manifest manifest;
@@ -1136,6 +1144,9 @@ static void testCollectionFlow()
     CHECK(p.needsSorting);
     CHECK(QFileInfo::exists(s.inst.profileDir(options.profile) + QStringLiteral("/userlist.yaml")));
 
+    /* A rule of yours is already in LOOT's list when the collection arrives. */
+    put(Plugins::lootUserlistPath(s.inst), "plugins:\n  - name: Mine.esp\n    tag: [ Delev ]\n");
+
     Deploy::Report report;
     Engine::Callbacks callbacks;
     CHECK(Engine::activateProfile(s.inst, options.profile, callbacks, &report, &error));
@@ -1150,7 +1161,11 @@ static void testCollectionFlow()
     CHECK(pluginsTxt.contains("*modB.esp"));
     CHECK(pluginsTxt.contains("\nmodA.esp"));
     CHECK(slurp(s.inst.myGamesPath() + QStringLiteral("/Skyrim.ini")).contains("fTest=2"));
-    CHECK(QFileInfo::exists(Plugins::lootUserlistPath(s.inst)));
+    const QByteArray userlist = slurp(Plugins::lootUserlistPath(s.inst));
+    CHECK(userlist.contains("Mine.esp"));
+    CHECK(userlist.contains("Delev"));
+    CHECK(userlist.contains("moda.esp"));
+    CHECK(userlist.contains("Curated Group"));
 
     /* Running again installs nothing: that's the update path. */
     Engine::CollectionResult second;
@@ -1264,6 +1279,309 @@ static void testMo2Import()
     CHECK(!Wabbajack::readMo2Mod(tmp.path() + QStringLiteral("/Heading_separator"), &info));
 }
 
+/* --- LOOT's userlist --------------------------------------------------- */
+
+static QJsonObject jsonOf(const char *text)
+{
+    return QJsonDocument::fromJson(text).object();
+}
+
+static Yaml::Node parsed(const QByteArray &text)
+{
+    Yaml::Node node;
+    QString error;
+    if (!Yaml::parse(text, &node, &error))
+        std::printf("    %s\n", qPrintable(error));
+    return node;
+}
+
+static void testYaml()
+{
+    /* The shapes LOOT, Vortex and people write. */
+    const QByteArray text = R"(# my rules
+---
+globals: []
+bash_tags:
+- Delev
+plugins:
+  - name: 'it''s.esp'   # a comment
+    after: [ 'a.esp', b.esp,
+             { name: "c.esp", display: "see: \"c\"", condition: 'file("x.esp")' } ]
+    dirty:
+      - crc: 0xDEADBEEF
+        util: 'SSEEdit v4'
+        itm: 4
+    msg:
+      - type: say
+        content:
+          - lang: en
+            text: |
+              first
+                indented
+              # not a comment
+          - lang: fr
+            text: >-
+              folded
+              text
+
+              para
+    url: [ { link: 'https://example.com/a#b', name: x } ]
+  - name: plain with spaces.esp
+    group: Late Fixes & Changes
+    note: this runs
+      over lines
+  - name: "double\tquoted \u00e9 long
+      string"
+empty:
+tilde: ~
+)";
+    const Yaml::Node top = parsed(text);
+    CHECK(top.kind == Yaml::Node::Mapping);
+    const QJsonObject o = Yaml::toJson(top).toObject();
+    EQ(o.value("bash_tags").toArray().at(0).toString(), QStringLiteral("Delev"));
+    const QJsonArray plugins = o.value("plugins").toArray();
+    EQ(plugins.size(), qsizetype(3));
+    const QJsonObject first = plugins.at(0).toObject();
+    EQ(first.value("name").toString(), QStringLiteral("it's.esp"));
+    EQ(first.value("after").toArray().at(1).toString(), QStringLiteral("b.esp"));
+    EQ(first.value("after").toArray().at(2).toObject().value("display").toString(), QStringLiteral("see: \"c\""));
+    EQ(first.value("dirty").toArray().at(0).toObject().value("crc").toString(), QStringLiteral("0xDEADBEEF"));
+    const QJsonArray content = first.value("msg").toArray().at(0).toObject().value("content").toArray();
+    EQ(content.at(0).toObject().value("text").toString(), QStringLiteral("first\n  indented\n# not a comment\n"));
+    EQ(content.at(1).toObject().value("text").toString(), QStringLiteral("folded text\npara"));
+    EQ(first.value("url").toArray().at(0).toObject().value("link").toString(), QStringLiteral("https://example.com/a#b"));
+    EQ(plugins.at(1).toObject().value("group").toString(), QStringLiteral("Late Fixes & Changes"));
+    EQ(plugins.at(1).toObject().value("note").toString(), QStringLiteral("this runs over lines"));
+    EQ(plugins.at(2).toObject().value("name").toString(), QStringLiteral("double\tquoted \u00e9 long string"));
+
+    /* Writing it out changes nothing it says, and is stable. */
+    const QByteArray once = Yaml::dump(top);
+    CHECK(once.contains("crc: 0xDEADBEEF"));
+    EQ(Yaml::toJson(parsed(once)), Yaml::toJson(top));
+    EQ(Yaml::dump(parsed(once)), once);
+
+    /* JSON is YAML, which is how profiles store a collection's rules. */
+    EQ(Yaml::toJson(parsed(R"({"plugins":[{"name":"a.esp","after":["b.esp"]}],"globals":[]})"))
+           .toObject().value("plugins").toArray().at(0).toObject().value("after").toArray().at(0).toString(),
+       QStringLiteral("b.esp"));
+    Yaml::Node blank = parsed("\xEF\xBB\xBF\r\n# nothing\r\n");
+    CHECK(blank.kind == Yaml::Node::Mapping && blank.entries.empty());
+    EQ(Yaml::toJson(parsed("a:\r\n  - b\r\n")).toObject().value("a").toArray().at(0).toString(), QStringLiteral("b"));
+
+    /* What can't survive a rewrite is refused, never guessed at. */
+    const char *refused[] = {
+        "a: &x 1\nb: *x\n", "a: !!str 1\n", "b: {}\na: {<<: *x}\n", "<<: x\n", "a: 1\n---\nb: 2\n",
+        "%YAML 1.2\n---\na: 1\n", "a: 1\na: 2\n", "a: b: c\n", "a:\n\t- b\n", "a: [1, 2\n", "a: 'open\n",
+        "a: 1\n   b: 2\n", "- a\nb: 1\n", "a: \"\\q\"\n", "a: 1\n  b: 2\n",
+    };
+    for (const char *bad : refused) {
+        Yaml::Node node;
+        QString error;
+        if (Yaml::parse(bad, &node, &error))
+            std::printf("    parsed but shouldn't: %s\n", bad);
+        CHECK(!Yaml::parse(bad, &node, &error));
+        CHECK(!error.isEmpty());
+    }
+    Yaml::Node node;
+    QString error;
+    CHECK(!Yaml::parse(QByteArray("a: \xFF\xFE\n"), &node, &error));
+}
+
+static void testUserlistMerge()
+{
+    const QByteArray mine = R"(globals:
+  - type: say
+    content: my note
+plugins:
+  - name: Mine.esp
+    after: [ 'Other.esp' ]
+    tag: [ Delev ]
+    dirty:
+      - crc: 0xDEADBEEF
+        util: SSEEdit
+  - name: Shared.esp
+    group: My Group
+    after:
+      - Keep.esp
+groups:
+  - name: My Group
+    after: [ default ]
+)";
+    const QJsonObject rules = jsonOf(R"({
+        "groups": [{"name": "Curator Group", "after": []}, {"name": "my group", "after": ["Late"]}],
+        "plugins": [
+            {"name": "New.esp", "group": "Curator Group", "after": ["Base.esp"], "req": []},
+            {"name": "shared.ESP", "group": "Their Group", "after": ["keep.esp", "Added.esp"]},
+            {"name": "Empty.esp", "after": [], "req": []}
+        ]})");
+
+    Userlist::Merged m;
+    QString error;
+    CHECK(Userlist::merge(mine, rules, {}, &m, &error));
+    CHECK(m.changed);
+    QJsonObject out = Yaml::toJson(parsed(m.text)).toObject();
+    QHash<QString, QJsonObject> byName;
+    const auto index = [&](const QJsonObject &document) {
+        byName.clear();
+        const QJsonArray plugins = document.value("plugins").toArray();
+        for (const QJsonValue &v : plugins)
+            byName.insert(v.toObject().value("name").toString().toLower(), v.toObject());
+    };
+    index(out);
+
+    /* Yours is all still there, down to the hex number. */
+    CHECK(m.text.contains("0xDEADBEEF"));
+    EQ(byName.value("mine.esp").value("tag").toArray().at(0).toString(), QStringLiteral("Delev"));
+    EQ(out.value("globals").toArray().size(), qsizetype(1));
+    /* The collection's are in, and a plugin never appears twice, in any case. */
+    EQ(byName.value("new.esp").value("group").toString(), QStringLiteral("Curator Group"));
+    EQ(out.value("plugins").toArray().size(), qsizetype(3));
+    EQ(byName.value("shared.esp").value("after").toArray().size(), qsizetype(2));
+    CHECK(!byName.contains("empty.esp"));
+    /* One answer only: yours, and the deploy report says so. */
+    EQ(byName.value("shared.esp").value("group").toString(), QStringLiteral("My Group"));
+    EQ(m.notes.size(), qsizetype(1));
+    CHECK(m.notes.front().contains(QStringLiteral("My Group")));
+    CHECK(m.notes.front().contains(QStringLiteral("Their Group")));
+    /* Groups merge by name too, and a bare one is kept so plugins can use it. */
+    const QJsonArray groups = out.value("groups").toArray();
+    EQ(groups.size(), qsizetype(2));
+    EQ(groups.at(0).toObject().value("after").toArray().size(), qsizetype(2));
+    EQ(groups.at(1).toObject().value("name").toString(), QStringLiteral("Curator Group"));
+
+    /* Rules you already had aren't recorded as fanMO's. */
+    CHECK(!QJsonDocument(m.added).toJson().contains("keep.esp"));
+
+    /* Running again with the same rules is a no-op, down to the bytes. */
+    Userlist::Merged again;
+    CHECK(Userlist::merge(m.text, rules, {m.added}, &again, &error));
+    CHECK(!again.changed);
+    EQ(again.added, m.added);
+
+    /* A new revision drops rules: only what fanMO added goes away. */
+    const QJsonObject next = jsonOf(R"({"plugins": [{"name": "Next.esp", "after": ["Base.esp"]}]})");
+    Userlist::Merged update;
+    CHECK(Userlist::merge(m.text, next, {m.added}, &update, &error));
+    out = Yaml::toJson(parsed(update.text)).toObject();
+    index(out);
+    CHECK(!byName.contains("new.esp"));
+    CHECK(byName.contains("next.esp"));
+    EQ(byName.value("shared.esp").value("after").toArray().size(), qsizetype(1));
+    EQ(byName.value("shared.esp").value("group").toString(), QStringLiteral("My Group"));
+    EQ(out.value("groups").toArray().size(), qsizetype(1));
+    EQ(out.value("groups").toArray().at(0).toObject().value("after").toArray().size(), qsizetype(1));
+
+    /* A profile with no rules gets back exactly what you had. */
+    Userlist::Merged none;
+    CHECK(Userlist::merge(m.text, {}, {m.added}, &none, &error));
+    EQ(Yaml::toJson(parsed(none.text)), Yaml::toJson(parsed(mine)));
+    CHECK(none.added.isEmpty());
+
+    /* Added in LOOT after the merge, onto fanMO's own entries: stays. */
+    QByteArray edited = m.text;
+    edited.replace("group: \"Curator Group\"", "group: \"Curator Group\"\n    tag:\n      - Relev");
+    CHECK(edited != m.text);
+    Userlist::Merged kept;
+    CHECK(Userlist::merge(edited, {}, {m.added}, &kept, &error));
+    index(Yaml::toJson(parsed(kept.text)).toObject());
+    EQ(byName.value("new.esp").value("tag").toArray().at(0).toString(), QStringLiteral("Relev"));
+    CHECK(!byName.value("new.esp").contains("group"));
+
+    /* Moved to your own group in LOOT: yours now, not fanMO's to remove. */
+    QByteArray moved = m.text;
+    moved.replace("group: \"Curator Group\"", "group: \"Mine Now\"");
+    Userlist::Merged takenOver;
+    CHECK(Userlist::merge(moved, {}, {m.added}, &takenOver, &error));
+    index(Yaml::toJson(parsed(takenOver.text)).toObject());
+    EQ(byName.value("new.esp").value("group").toString(), QStringLiteral("Mine Now"));
+
+    /* Nothing to do never reformats your file. */
+    Userlist::Merged idle;
+    CHECK(Userlist::merge(mine, {}, {}, &idle, &error));
+    CHECK(!idle.changed);
+
+    /* An empty start gets the sections LOOT's own files have. */
+    Userlist::Merged fresh;
+    CHECK(Userlist::merge(QByteArray(), rules, {}, &fresh, &error));
+    CHECK(Yaml::toJson(parsed(fresh.text)).toObject().contains("globals"));
+
+    /* Not a userlist: refused rather than rewritten. */
+    for (const char *bad : {"- a\n- b\n", "plugins: nope\n", "plugins:\n  - after: [a]\n", "plugins: [a.esp]\n", "a: &x 1\n"}) {
+        Userlist::Merged refused;
+        QString why;
+        CHECK(!Userlist::merge(bad, rules, {}, &refused, &why));
+        CHECK(!why.isEmpty());
+    }
+}
+
+static void testUserlistSync()
+{
+    Sandbox s;
+    QString error;
+    QStringList notes;
+    const QString target = Plugins::lootUserlistPath(s.inst);
+    const QString backup = target + QStringLiteral(".fanmo-backup");
+    const QString name = s.profile.name;
+
+    /* Nothing from anyone: no file appears. */
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    CHECK(!QFileInfo::exists(target));
+
+    const QByteArray mine = "plugins:\n  - name: Mine.esp\n    after: [ Other.esp ]\n";
+    put(target, mine);
+    put(s.inst.profileDir(name) + QStringLiteral("/userlist.yaml"),
+        R"({"globals":[],"groups":[],"plugins":[{"name":"Curated.esp","group":"Dynamic LOD"}]})");
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    QByteArray first = slurp(target);
+    CHECK(first.contains("Mine.esp"));
+    CHECK(first.contains("Curated.esp"));
+    EQ(slurp(backup), mine);
+
+    /* A second deploy doesn't touch it; the backup stays the original. */
+    const QDateTime stamp = QFileInfo(target).lastModified();
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    EQ(slurp(target), first);
+    EQ(QFileInfo(target).lastModified(), stamp);
+
+    /* Your edit in LOOT survives the next deploy. */
+    QByteArray edited = first;
+    edited.replace("Other.esp", "Different.esp");
+    put(target, edited);
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    CHECK(slurp(target).contains("Different.esp"));
+    CHECK(slurp(target).contains("Curated.esp"));
+
+    /* A profile with no collection takes the rules back out. */
+    Profile plain;
+    plain.name = QStringLiteral("Plain");
+    CHECK(s.inst.saveProfile(plain, &error));
+    CHECK(Userlist::sync(s.inst, plain.name, &notes, &error));
+    CHECK(!slurp(target).contains("Curated.esp"));
+    CHECK(slurp(target).contains("Different.esp"));
+
+    /* And switching back restores them. */
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    CHECK(slurp(target).contains("Curated.esp"));
+
+    /* A list it can't read is left alone, and the rules stay owed. */
+    const QByteArray strange = "plugins:\n  - &a\n    name: Mine.esp\n";
+    put(target, strange);
+    error.clear();
+    CHECK(!Userlist::sync(s.inst, name, &notes, &error));
+    CHECK(!error.isEmpty());
+    EQ(slurp(target), strange);
+
+    /* The same failure doesn't stop a deploy; it's reported. */
+    Deploy::Report report;
+    Engine::Callbacks callbacks;
+    CHECK(Engine::activateProfile(s.inst, name, callbacks, &report, &error));
+    EQ(slurp(target), strange);
+    bool warned = false;
+    for (const QString &warning : std::as_const(report.warnings))
+        warned = warned || warning.contains(QStringLiteral("userlist"));
+    CHECK(warned);
+}
+
 static void testHashes()
 {
     EQ(Util::wabbajackHash(0x0123456789abcdefULL), QStringLiteral("782riWdFIwE="));
@@ -1286,7 +1604,8 @@ int main(int argc, char *argv[])
         {"deploy root mod", testDeployRootMod}, {"deploy refusals", testDeployRefusals},
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
-        {"mo2 import", testMo2Import}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm},
+        {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
+        {"userlist sync", testUserlistSync}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm},
     };
     for (const auto &t : tests) {
         const int before = failures;

@@ -5,6 +5,7 @@
 #include "installer.h"
 #include "nexus.h"
 #include "plugins.h"
+#include "userlist.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -721,17 +722,15 @@ bool activateProfile(Instance &instance, const QString &name, const Callbacks &c
     if (!instance.saveProfile(profile, error) || !Plugins::write(instance, profile, error))
         return false;
 
-    /* Hand LOOT the profile's rules, keeping any list that was there. */
-    const QString rules = instance.profileDir(name) + QStringLiteral("/userlist.yaml");
-    if (QFileInfo::exists(rules)) {
-        const QString target = Plugins::lootUserlistPath(instance);
-        QDir().mkpath(QFileInfo(target).absolutePath());
-        const QString backup = target + QStringLiteral(".fanmo-backup");
-        if (QFileInfo::exists(target) && !QFileInfo::exists(backup))
-            QFile::copy(target, backup);
-        QFile::remove(target);
-        QFile::copy(rules, target);
-    }
+    /* The game is deployed by now, so a userlist that can't be merged is a
+     * warning: the rules are missing from LOOT, nothing else is wrong. */
+    QStringList notes;
+    QString rulesError;
+    if (!Userlist::sync(instance, name, &notes, &rulesError))
+        report->warnings << QStringLiteral("LOOT's userlist left as it was, so the collection's rules aren't in it: %1")
+                                .arg(rulesError);
+    report->warnings += notes;
+
     const QString previous = instance.activeProfile();
     if (!applyIniState(instance, previous, profile, error))
         return false;
