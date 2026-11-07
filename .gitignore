@@ -1,0 +1,6 @@
+fanmo
+fanmo-cli
+fanmo-tests
+build/
+compile_flags.txt
+fanmo-uitests

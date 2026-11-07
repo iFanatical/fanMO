@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=fanMO
+GenericName=Mod Organizer
+Comment=Native mod organizer for Skyrim Special Edition
+Exec=fanmo %u
+Icon=applications-games
+Terminal=false
+Categories=Game;Utility;
+MimeType=x-scheme-handler/nxm;x-scheme-handler/nxm-protocol;
