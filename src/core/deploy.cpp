@@ -46,10 +46,12 @@ static QString dataPathOf(bool rootDeploy, const QString &relPath)
 }
 
 /* Mods carry things that aren't game data: FOMOD leftovers aren't filtered
- * (Vortex deploys them too), only our own and Vortex's markers are. */
+ * (Vortex deploys them too), only our own and Vortex's markers are, and a
+ * mod's INI Tweaks folder, which goes into My Games' INIs instead. */
 static bool ignoredFile(const QString &relPath)
 {
-    return relPath == QLatin1String("__folder_managed_by_vortex");
+    return relPath == QLatin1String("__folder_managed_by_vortex")
+        || relPath.startsWith(QLatin1String("ini tweaks/"), Qt::CaseInsensitive);
 }
 
 FileIndex buildIndex(std::vector<Layer> layers)

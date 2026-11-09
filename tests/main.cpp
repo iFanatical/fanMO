@@ -1428,6 +1428,51 @@ static void testProfiles()
     CHECK(s.inst.deleteProfile(s.profile.name, &error));
 }
 
+static void testModIniTweaks()
+{
+    Sandbox s;
+    QString error;
+    s.addMod(QStringLiteral("bows"), {{QStringLiteral("INI Tweaks/Bows [Skyrim].ini"),
+                                       "[COMBAT]\r\nfArrowSpeedMult=3.0\r\nbForceNPCsUseAmmo=1\r\n"},
+                                      {QStringLiteral("meshes/bow.nif"), "bow"}});
+    s.addMod(QStringLiteral("later"), {{QStringLiteral("Ini Tweaks/Later [Skyrim].ini"), "[Combat]\r\nfArrowSpeedMult=4.0\r\n"},
+                                       {QStringLiteral("ini tweaks/Prefs [skyrimprefs].ini"), "[Display]\r\nfShadowDistance=5000\r\n"},
+                                       {QStringLiteral("INI Tweaks/Other [Fallout4].ini"), "[X]\r\na=1\r\n"}});
+    put(s.inst.myGamesPath() + QStringLiteral("/Skyrim.ini"), "[Combat]\r\nfMagnetism=0.0\r\n");
+    CHECK(s.inst.save(&error));
+    CHECK(s.inst.saveProfile(s.profile, &error));
+
+    QStringList logged;
+    Engine::Callbacks callbacks;
+    callbacks.log = [&logged](const QString &line) { logged << line; };
+    Deploy::Report r;
+    CHECK(Engine::activateProfile(s.inst, s.profile.name, callbacks, &r, &error));
+
+    /* The tweaks stay out of Data; the rest of the mod deploys. */
+    CHECK(QFileInfo::exists(s.data(QStringLiteral("meshes/bow.nif"))));
+    for (const QString &f : Util::walkFiles(s.game + QStringLiteral("/Data")))
+        CHECK(!f.startsWith(QLatin1String("ini tweaks"), Qt::CaseInsensitive));
+
+    /* Merged into the existing section, the higher mod's value last. */
+    const QByteArray ini = slurp(s.inst.myGamesPath() + QStringLiteral("/Skyrim.ini"));
+    CHECK(ini.contains("[Combat]\r\nfMagnetism=0.0\r\nfArrowSpeedMult=4.0\r\nbForceNPCsUseAmmo=1\r\n"));
+    CHECK(!ini.contains("[COMBAT]"));
+    /* "[skyrimprefs]" lands in the game's own spelling, not a second file. */
+    CHECK(slurp(s.inst.myGamesPath() + QStringLiteral("/SkyrimPrefs.ini")).contains("fShadowDistance=5000"));
+    CHECK(!QFileInfo::exists(s.inst.myGamesPath() + QStringLiteral("/skyrimprefs.ini")));
+    /* An INI Skyrim doesn't read is left out, and said so. */
+    CHECK(!QFileInfo::exists(s.inst.myGamesPath() + QStringLiteral("/Fallout4.ini")));
+    CHECK(std::any_of(r.warnings.begin(), r.warnings.end(),
+                      [](const QString &w) { return w.contains(QLatin1String("Fallout4.ini")); }));
+    EQ(logged.filter(QStringLiteral("INI tweak")).size(), qsizetype(3));
+
+    /* A disabled mod's tweaks don't apply. */
+    s.profile.mods[1].enabled = false;
+    CHECK(s.inst.saveProfile(s.profile, &error));
+    CHECK(Engine::activateProfile(s.inst, s.profile.name, {}, &r, &error));
+    CHECK(slurp(s.inst.myGamesPath() + QStringLiteral("/Skyrim.ini")).contains("fArrowSpeedMult=3.0\r\n"));
+}
+
 static void testNxm()
 {
     auto l = Nexus::parseNxm(QStringLiteral("nxm://skyrimspecialedition/mods/266/files/123?key=abc&expires=99&user_id=7"));
@@ -1949,7 +1994,7 @@ int main(int argc, char *argv[])
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
         {"native tools", testNativeTools}, {"userlist sync native", testUserlistSyncNative},
     };
     for (const auto &t : tests) {

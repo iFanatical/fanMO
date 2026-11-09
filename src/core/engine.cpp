@@ -657,21 +657,56 @@ bool mergeIni(const QString &target, const QStringList &tweakFiles, QString *err
     return Util::writeFile(target, (lines.join(QStringLiteral("\r\n")) + QStringLiteral("\r\n")).toUtf8(), error);
 }
 
-/* The file in My Games a tweak named "... [SkyrimPrefs].ini" goes to. */
+static const QStringList &gameInis()
+{
+    static const QStringList inis = {QStringLiteral("Skyrim.ini"), QStringLiteral("SkyrimPrefs.ini"),
+                                     QStringLiteral("SkyrimCustom.ini")};
+    return inis;
+}
+
+/* The file in My Games a tweak named "... [SkyrimPrefs].ini" goes to, spelled
+ * the game's way: "[skyrimprefs]" mustn't make a second file beside it. */
 static QString tweakTarget(const QString &fileName)
 {
     static const QRegularExpression re(QStringLiteral("\\[([^\\]]+)\\]\\.ini$"), QRegularExpression::CaseInsensitiveOption);
     const auto m = re.match(fileName);
-    return m.hasMatch() ? m.captured(1) + QStringLiteral(".ini") : QStringLiteral("Skyrim.ini");
+    const QString target = m.hasMatch() ? m.captured(1) + QStringLiteral(".ini") : QStringLiteral("Skyrim.ini");
+    for (const QString &ini : gameInis())
+        if (ini.compare(target, Qt::CaseInsensitive) == 0)
+            return ini;
+    return target;
 }
 
-/* Swaps the profile's INIs into My Games, and points saves at its folder. */
-static bool applyIniState(Instance &instance, const QString &previous, const Profile &next, QString *error)
+/* Tweaks an enabled mod carries in its "INI Tweaks" folder, Vortex's
+ * convention, lowest priority first so the winning mod's values land last. */
+static QStringList modTweaks(const Instance &instance, const Profile &profile)
+{
+    QStringList out;
+    for (const ProfileMod &m : profile.mods) {
+        if (!m.enabled)
+            continue;
+        const QDir mod(instance.modsPath() + QLatin1Char('/') + m.folder);
+        for (const QString &dir : mod.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            if (dir.compare(QLatin1String("INI Tweaks"), Qt::CaseInsensitive) != 0)
+                continue;
+            const QDir tweaks(mod.filePath(dir));
+            for (const QFileInfo &fi : tweaks.entryInfoList({QStringLiteral("*.ini")}, QDir::Files,
+                                                            QDir::Name | QDir::IgnoreCase))
+                out << fi.filePath();
+        }
+    }
+    return out;
+}
+
+/* Swaps the profile's INIs into My Games, and points saves at its folder.
+ * The collection's tweaks go first, then the mods', so a mod of your own
+ * overrides what the collection set. */
+static bool applyIniState(Instance &instance, const QString &previous, const Profile &next,
+                          QStringList *notes, QStringList *warnings, QString *error)
 {
     const QString myGames = instance.myGamesPath();
     QDir().mkpath(myGames);
-    static const QStringList inis = {QStringLiteral("Skyrim.ini"), QStringLiteral("SkyrimPrefs.ini"),
-                                     QStringLiteral("SkyrimCustom.ini")};
+    const QStringList &inis = gameInis();
     Profile prior;
     QString ignored;
     if (previous != next.name && instance.loadProfile(previous, &prior, &ignored) && prior.localInis)
@@ -694,6 +729,19 @@ static bool applyIniState(Instance &instance, const QString &previous, const Pro
         const QString file = instance.profileDir(next.name) + QStringLiteral("/ini-tweaks/") + tweak;
         if (!mergeIni(myGames + QLatin1Char('/') + tweakTarget(tweak), {file}, error))
             return false;
+    }
+    const QString modsRoot = instance.modsPath() + QLatin1Char('/');
+    for (const QString &file : modTweaks(instance, next)) {
+        const QString target = tweakTarget(QFileInfo(file).fileName());
+        const QString shown = file.mid(modsRoot.size());
+        /* A mod made for another game names an INI Skyrim never reads. */
+        if (!inis.contains(target)) {
+            *warnings << QStringLiteral("INI tweak %1 left out: Skyrim doesn't read %2").arg(shown, target);
+            continue;
+        }
+        if (!mergeIni(myGames + QLatin1Char('/') + target, {file}, error))
+            return false;
+        *notes << QStringLiteral("INI tweak %1 merged into %2").arg(shown, target);
     }
 
     /* A one-line INI of our own holding one value, merged like a tweak. */
@@ -739,8 +787,12 @@ bool activateProfile(Instance &instance, const QString &name, const Callbacks &c
     report->warnings += notes;
 
     const QString previous = instance.activeProfile();
-    if (!applyIniState(instance, previous, profile, error))
+    QStringList tweakNotes;
+    if (!applyIniState(instance, previous, profile, &tweakNotes, &report->warnings, error))
         return false;
+    if (callbacks.log)
+        for (const QString &note : std::as_const(tweakNotes))
+            callbacks.log(note);
     instance.setActiveProfile(name);
     return instance.save(error);
 }

@@ -109,6 +109,29 @@ your own value instead. The first version of your list is kept as
 If the list uses YAML that fanMO can't rewrite faithfully, such as anchors, it
 leaves the file alone and warns, and the collection's rules aren't added.
 
+## INI tweaks
+
+Every deploy merges INI tweaks into the INIs in `My Games`. The name in
+brackets picks the file: `My Changes [Skyrim].ini` goes into `Skyrim.ini`,
+`[SkyrimPrefs]` into `SkyrimPrefs.ini`, and a name without brackets into
+`Skyrim.ini`. Each key replaces the same key in the same section, ignoring
+case; a key that isn't there is added to its section. Nothing else in the INI
+changes, and removing a key from a tweak doesn't remove it from the INI.
+
+Tweaks come from two places, applied in this order:
+
+1. The collection's, copied into the profile's `ini-tweaks/` folder when the
+   collection is installed. Installing it again copies them fresh, so edits
+   made there don't survive an update.
+2. Any enabled mod's `INI Tweaks/` folder, Vortex's convention, in mod
+   priority order. That folder isn't deployed into `Data`. Since these go
+   last, a mod of your own overrides the collection's values and survives
+   reinstalls. Vortex makes you turn each of a mod's tweaks on; fanMO applies
+   them whenever the mod is enabled, and the deploy log lists each one.
+
+Editing a tweak doesn't mark the profile as changed, so press Deploy to apply
+it; Run deploys first only when the mod or plugin lists have changed.
+
 ## How deployment stays safe
 
 - Nothing is deleted that isn't in fanMO's manifest. A file in the way moves to
