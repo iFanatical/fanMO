@@ -3,7 +3,8 @@
 A native C++/Qt6 mod organizer for Skyrim Special Edition on Linux. It has
 MO2's layout and a priority list you drag around, deploys with hard links the
 way Vortex does, and installs Nexus collections and Wabbajack lists without
-Wine. Windows tools still run, through the game's Proton prefix.
+Wine. Windows tools still run, through the game's Proton prefix; Linux
+programs, a native LOOT among them, run directly.
 
 ## What it does
 
@@ -26,9 +27,10 @@ Wine. Windows tools still run, through the game's Proton prefix.
   DLLs Windows loads from there, and says so in the log.
 - **Profiles**: separate mod lists and load orders, optionally separate saves
   and INIs.
-- **Tools**: anything run through Proton in the game's prefix. New files in
-  `Data` go to a mod you name, or to Overwrite. A tool marked as a sorter
-  (LOOT) has its load order read back afterwards.
+- **Tools**: Windows programs run through Proton in the game's prefix; Linux
+  programs (anything that isn't `.exe`, `.bat`, `.cmd`, `.com` or `.msi`) run
+  as they are. New files in `Data` go to a mod you name, or to Overwrite. A
+  tool marked as a sorter (LOOT) has its load order read back afterwards.
 
 ## Build
 
@@ -64,13 +66,21 @@ After installing a collection, a profile has an order the game can load
 (masters first, the curator's rules applied) but not a good one, and the status
 bar says so. Then either:
 
-- **Run LOOT.** Add `LOOT.exe` in Settings: fanMO fills in
-  `--game --game-path --auto-sort` and reads the result back when it exits. On
-  deploy, the curator's rules are merged into LOOT's `userlist.yaml` in the
-  prefix.
-  LOOT 0.29 needs one file Proton doesn't provide: copy Proton's
-  `files/lib/wine/x86_64-windows/icu.dll` into LOOT's program folder as
-  `icuuc.dll`, or LOOT exits at once with no window. If a sorter exits with an
+- **Run LOOT.** Add LOOT in Settings: fanMO fills in
+  `--game --game-path --auto-sort` and reads the result back when it exits.
+  - *Native LOOT* (recommended): a Linux build of LOOT, such as the one
+    `../loot/build.sh` makes. Add its `LOOT` program. It runs without Proton,
+    finds the game's prefix through Steam, and sorts the same `Plugins.txt`.
+    It keeps its data in `~/.local/share/LOOT` (or `--loot-data-path`).
+  - *Windows LOOT*: add `LOOT.exe`. LOOT 0.29 needs one file Proton doesn't
+    provide: copy Proton's `files/lib/wine/x86_64-windows/icu.dll` into LOOT's
+    program folder as `icuuc.dll`, or LOOT exits at once with no window.
+
+  On deploy, the curator's rules are merged into every LOOT's
+  `userlist.yaml`: the prefix's, and each native LOOT tool's. A native LOOT
+  with no userlist yet starts from a copy of the prefix's, so your own rules
+  come along; after that the two are separate files.
+  If a sorter exits with an
   error, or changes nothing, fanMO doesn't read the order back, and the log
   says so; each tool's output is kept in `logs/` in the instance.
 - **Import an order.** Plugins tab, Import load order: any LOOT-sorted
@@ -87,7 +97,8 @@ its own master. A master that isn't installed or is switched off is reported
 in the log instead: moving can't fix those.
 
 The userlist is shared with you: rules you add in LOOT stay. fanMO records what
-it added in `state/loot-userlist.json` and takes back only that, so a rule a new
+it added in `state/loot-userlist.json` (and `state/loot-userlist-native-*.json`
+for a native LOOT) and takes back only that, so a rule a new
 revision dropped goes away, and a profile without a collection gets your list
 back. Where you and a collection disagree on something with one answer, such as
 a plugin's group, yours stays and the deploy log says so. A rule of the
@@ -139,8 +150,8 @@ with an existing Vortex install, which is how the installer was checked.
 - Skyrim Special Edition only.
 - C# script FOMODs don't run (Vortex collections don't record their choices
   either). XML FOMODs do.
-- LOOT, xEdit and the like stay Windows tools run through Proton; fanMO doesn't
-  sort plugins itself.
+- fanMO doesn't sort plugins itself: it runs LOOT, natively or through
+  Proton. xEdit and the like stay Windows tools run through Proton.
 - A FOMOD whose output depends on which plugins are active gets the state of
   the finished collection. Vortex uses whatever happened to be active at that
   moment, so the two can differ on such a mod.

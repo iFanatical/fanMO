@@ -1,6 +1,7 @@
 #include "dialogs.h"
 
 #include "core/deploy.h"
+#include "core/launcher.h"
 #include "core/nexus.h"
 #include "core/steam.h"
 #include "core/util.h"
@@ -201,7 +202,8 @@ SettingsDialog::SettingsDialog(Instance &instance, QWidget *parent)
     layout->addLayout(folderButtons);
 
     auto *toolsLabel = new QLabel(QStringLiteral(
-        "Tools run through Proton. New files in Data go to Output mod (or Overwrite if blank). "
+        "Windows tools (.exe) run through Proton; Linux programs, such as a native LOOT, run as they are. "
+        "New files in Data go to Output mod (or Overwrite if blank). "
         "Tick Plugins for sorters like LOOT, so their order is read back."));
     toolsLabel->setObjectName(QStringLiteral("muted"));
     toolsLabel->setWordWrap(true);
@@ -261,19 +263,28 @@ SettingsDialog::SettingsDialog(Instance &instance, QWidget *parent)
 void SettingsDialog::addTool()
 {
     const QString exe = QFileDialog::getOpenFileName(this, QStringLiteral("Program"), QString(),
-                                                     QStringLiteral("Windows programs (*.exe);;All files (*)"));
+                                                     QStringLiteral("All programs (*);;Windows programs (*.exe)"));
     if (exe.isEmpty())
         return;
     const int row = m_tools->rowCount();
     m_tools->insertRow(row);
     m_tools->setItem(row, 0, new QTableWidgetItem(QFileInfo(exe).completeBaseName()));
     m_tools->setItem(row, 1, new QTableWidgetItem(exe));
-    /* LOOT sorts and quits, and told where the game is it needs no setup. */
-    const bool loot = QFileInfo(exe).fileName().compare(QLatin1String("loot.exe"), Qt::CaseInsensitive) == 0;
-    QString windowsGame = QStringLiteral("Z:") + m_instance.gamePath();
-    windowsGame.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    /* LOOT sorts and quits, and told where the game is it needs no setup.
+     * Windows LOOT wants the path as Proton shows it; a native one finds the
+     * prefix, and the Plugins.txt in it, through Steam on its own. */
+    Tool picked;
+    picked.exe = exe;
+    const bool nativeLoot = Launcher::isNativeLoot(picked);
+    const bool loot = nativeLoot
+        || QFileInfo(exe).fileName().compare(QLatin1String("loot.exe"), Qt::CaseInsensitive) == 0;
+    QString gamePath = m_instance.gamePath();
+    if (!nativeLoot) {
+        gamePath.prepend(QStringLiteral("Z:"));
+        gamePath.replace(QLatin1Char('/'), QLatin1Char('\\'));
+    }
     m_tools->setItem(row, 2, new QTableWidgetItem(
-        loot ? QStringLiteral("--game=\"Skyrim Special Edition\" --game-path=\"%1\" --auto-sort").arg(windowsGame)
+        loot ? QStringLiteral("--game=\"Skyrim Special Edition\" --game-path=\"%1\" --auto-sort").arg(gamePath)
              : QString()));
     m_tools->setItem(row, 3, new QTableWidgetItem);
     auto *sync = new QTableWidgetItem;

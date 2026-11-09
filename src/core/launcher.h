@@ -1,5 +1,6 @@
-/* Running Windows programs in the game's Proton prefix -- the same way your
- * vortex.sh does, with the variables Proton wants from Steam. */
+/* Running tools: Windows programs in the game's Proton prefix -- the same way
+ * your vortex.sh does, with the variables Proton wants from Steam -- and Linux
+ * programs, such as a native LOOT, directly. */
 #ifndef FANMO_LAUNCHER_H
 #define FANMO_LAUNCHER_H
 
@@ -16,6 +17,17 @@ bool prepare(const Instance &instance, const Tool &tool, QProcess *process, QStr
 
 /* Tool::exe made absolute. */
 QString resolveExe(const Instance &instance, const Tool &tool);
+
+/* Whether a program needs Proton: .exe, .bat, .cmd, .com and .msi do,
+ * anything else runs as it is. */
+bool isWindowsProgram(const QString &exe);
+
+/* A Linux build of LOOT: a program called LOOT that isn't a Windows one. */
+bool isNativeLoot(const Tool &tool);
+
+/* Where a native LOOT keeps its data: the tool's --loot-data-path if it has
+ * one, otherwise LOOT's own default, $XDG_DATA_HOME/LOOT. */
+QString nativeLootDataPath(const Tool &tool);
 
 /* Splits an argument string, honouring double quotes. */
 QStringList splitArguments(const QString &text);

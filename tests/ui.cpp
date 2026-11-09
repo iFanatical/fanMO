@@ -432,6 +432,60 @@ static void testToolRun()
     CHECK(sorted());
     if (!text.contains(QStringLiteral("read back")))
         std::printf("    log was: %s\n", qPrintable(text.left(600)));
+
+    /* A Linux sorter runs without Proton: with Proton gone it still runs, and
+     * its order is read back the same way. */
+    QFile::remove(proton);
+    /* Native LOOT's userlist goes under here, not in your home. */
+    qputenv("XDG_DATA_HOME", QFile::encodeName(tmp.path() + QStringLiteral("/xdg")));
+    const QString native = tmp.path() + QStringLiteral("/native/LOOT");
+    put(native, "#!/bin/sh\nprintf '*a.esp\\n*b.esp\\n' > \"$FAKE_PLUGINS\"\n");
+    QFile::setPermissions(native, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    Tool loot;
+    loot.name = QStringLiteral("Native LOOT");
+    loot.exe = native;
+    loot.syncPlugins = true;
+    Instance edited;
+    CHECK(edited.load(root, &error));
+    edited.tools().push_back(loot);
+    CHECK(edited.save(&error));
+    MainWindow second;
+    CHECK(second.openInstance(root));
+    second.show();
+    second.waitForScan();
+    QComboBox *secondTools = nullptr;
+    for (QComboBox *c : second.findChildren<QComboBox *>())
+        if (c->findText(loot.name) >= 0)
+            secondTools = c;
+    QPlainTextEdit *secondLog = nullptr;
+    for (QTabWidget *tabs : second.findChildren<QTabWidget *>())
+        for (int i = 0; i < tabs->count(); ++i)
+            if (tabs->tabText(i) == QStringLiteral("Log"))
+                secondLog = qobject_cast<QPlainTextEdit *>(tabs->widget(i));
+    CHECK(secondTools && secondLog);
+    if (!secondTools || !secondLog)
+        return;
+    secondTools->setCurrentIndex(secondTools->findText(loot.name));
+    secondLog->clear();
+    QAbstractButton *secondRun = button(&second, QStringLiteral("Run"));
+    CHECK(secondRun);
+    if (!secondRun)
+        return;
+    secondRun->click();
+    waitFor([&] { return secondLog->toPlainText().contains(QStringLiteral("Native LOOT ")) && secondRun->isEnabled()
+                         && secondRun->text() == QStringLiteral("Run"); });
+    second.waitForScan();
+    text = secondLog->toPlainText();
+    CHECK(text.contains(QStringLiteral("Native LOOT finished after")));
+    CHECK(text.contains(QStringLiteral("load order read back from Native LOOT")));
+    Profile after;
+    CHECK(inst.loadProfile(QStringLiteral("Default"), &after, &error));
+    QStringList order;
+    for (const ProfilePlugin &p : after.plugins)
+        order << p.name;
+    CHECK(order.indexOf(QStringLiteral("a.esp")) < order.indexOf(QStringLiteral("b.esp")));
+    if (!text.contains(QStringLiteral("read back from Native")))
+        std::printf("    log was: %s\n", qPrintable(text.left(600)));
 }
 
 static void testWindow()

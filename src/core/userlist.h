@@ -32,8 +32,11 @@ struct Merged {
 bool merge(const QByteArray &current, const QJsonObject &rules, const QList<QJsonObject> &previous,
            Merged *out, QString *error);
 
-/* Brings LOOT's userlist in the game's prefix up to date with this profile.
- * A file that can't be read safely stays untouched and comes back as an error. */
+/* Brings every LOOT's userlist up to date with this profile: the one in the
+ * game's prefix, for Windows LOOT, and each native LOOT tool's. A native LOOT
+ * that has none yet starts from a copy of the prefix's. A file that can't be
+ * read safely stays untouched and comes back as an error; the others are
+ * still brought up to date. */
 bool sync(const Instance &instance, const QString &profile, QStringList *notes, QString *error);
 
 } /* namespace Userlist */

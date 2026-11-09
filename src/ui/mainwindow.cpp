@@ -948,11 +948,13 @@ void MainWindow::runTool()
             done();
             toolFinished(tool, code, status == QProcess::CrashExit, timer->elapsed(), before, logFile);
         });
-        connect(process, &QProcess::errorOccurred, this, [this, tool, done](QProcess::ProcessError e) {
+        connect(process, &QProcess::errorOccurred, this, [this, tool, done, process](QProcess::ProcessError e) {
             if (e != QProcess::FailedToStart)
                 return;
             done();
-            log(QStringLiteral("%1 didn't start: Proton couldn't be run").arg(tool.name));
+            log(Launcher::isWindowsProgram(tool.exe)
+                    ? QStringLiteral("%1 didn't start: Proton couldn't be run").arg(tool.name)
+                    : QStringLiteral("%1 didn't start: %2").arg(tool.name, process->errorString()));
         });
         timer->start();
         process->start();

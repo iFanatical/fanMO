@@ -1,15 +1,19 @@
 #include "userlist.h"
 
 #include "instance.h"
+#include "launcher.h"
 #include "plugins.h"
 #include "util.h"
 #include "yaml.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+
+#include <algorithm>
 
 using Yaml::Node;
 
@@ -279,9 +283,114 @@ bool merge(const QByteArray &current, const QJsonObject &rules, const QList<QJso
     return true;
 }
 
+namespace {
+
+/* One LOOT's userlist, and the record of what fanMO put in it. */
+struct Target {
+    QString file;
+    QString record;
+};
+
+std::vector<Target> targets(const Instance &instance)
+{
+    std::vector<Target> out;
+    if (!instance.compatDataPath().isEmpty())
+        out.push_back({Plugins::lootUserlistPath(instance),
+                       instance.statePath() + QStringLiteral("/loot-userlist.json")});
+    for (const Tool &tool : instance.tools()) {
+        if (!Launcher::isNativeLoot(tool))
+            continue;
+        const QString file = Launcher::nativeLootDataPath(tool)
+            + QStringLiteral("/games/Skyrim Special Edition/userlist.yaml");
+        if (std::any_of(out.begin(), out.end(), [&](const Target &t) { return t.file == file; }))
+            continue;
+        /* Named after the file, so pointing LOOT elsewhere starts a new record. */
+        const QString key = QString::fromLatin1(
+            QCryptographicHash::hash(file.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
+        out.push_back({file, instance.statePath() + QStringLiteral("/loot-userlist-native-%1.json").arg(key)});
+    }
+    return out;
+}
+
+bool readRecord(const QString &recordFile, QList<QJsonObject> *out, QString *error)
+{
+    if (!QFileInfo::exists(recordFile))
+        return true;
+    const QJsonDocument doc = Util::readJson(recordFile, error);
+    if (!doc.isObject())
+        return false;
+    for (const QJsonValue &set : doc.object().value(QLatin1String("sets")).toArray())
+        *out << set.toObject();
+    return true;
+}
+
+/* A LOOT that has never had a userlist from fanMO starts with a copy of the
+ * prefix's, rules of yours and all, along with the record of which rules in
+ * it are fanMO's: the two describe the same text, so the merge stays exact. */
+bool seed(const Target &from, const Target &to, QString *error)
+{
+    if (QFileInfo::exists(to.file) || QFileInfo::exists(to.record) || !QFileInfo::exists(from.file))
+        return true;
+    QDir().mkpath(QFileInfo(to.file).absolutePath());
+    if (!QFile::copy(from.file, to.file)) {
+        *error = QStringLiteral("couldn't copy %1 to %2").arg(from.file, to.file);
+        return false;
+    }
+    if (QFileInfo::exists(from.record) && !QFile::copy(from.record, to.record)) {
+        QFile::remove(to.file);
+        *error = QStringLiteral("couldn't copy %1 to %2").arg(from.record, to.record);
+        return false;
+    }
+    return true;
+}
+
+bool syncOne(const Target &target, const QJsonObject &rules, QStringList *notes, QString *error)
+{
+    QList<QJsonObject> previous;
+    if (!readRecord(target.record, &previous, error))
+        return false;
+    if (rules.isEmpty() && previous.isEmpty())
+        return true;
+
+    QByteArray current;
+    if (QFileInfo::exists(target.file)) {
+        QFile file(target.file);
+        if (!file.open(QIODevice::ReadOnly)) {
+            *error = file.errorString();
+            return false;
+        }
+        current = file.readAll();
+    }
+
+    Merged merged;
+    if (!merge(current, rules, previous, &merged, error))
+        return false;
+    for (const QString &note : merged.notes)
+        if (!notes->contains(note))
+            *notes << note;
+
+    /* Until the list is written, either set could be what's in it. */
+    QList<QJsonObject> pending = previous;
+    pending << merged.added;
+    if (!Util::writeJson(target.record, recordOf(pending), error))
+        return false;
+    if (merged.changed) {
+        QDir().mkpath(QFileInfo(target.file).absolutePath());
+        const QString backup = target.file + QStringLiteral(".fanmo-backup");
+        if (QFileInfo::exists(target.file) && !QFileInfo::exists(backup))
+            QFile::copy(target.file, backup);
+        if (!Util::writeFile(target.file, merged.text, error))
+            return false;
+    }
+    return Util::writeJson(target.record, recordOf({merged.added}), error);
+}
+
+} /* namespace */
+
 bool sync(const Instance &instance, const QString &profile, QStringList *notes, QString *error)
 {
-    if (instance.compatDataPath().isEmpty())
+    const std::vector<Target> all = targets(instance);
+    if (all.empty())
         return true;
 
     const QString rulesFile = instance.profileDir(profile) + QStringLiteral("/userlist.yaml");
@@ -293,49 +402,25 @@ bool sync(const Instance &instance, const QString &profile, QStringList *notes, 
         rules = doc.object();
     }
 
-    const QString recordFile = instance.statePath() + QStringLiteral("/loot-userlist.json");
-    QList<QJsonObject> previous;
-    if (QFileInfo::exists(recordFile)) {
-        const QJsonDocument doc = Util::readJson(recordFile, error);
-        if (!doc.isObject())
-            return false;
-        const QJsonArray sets = doc.object().value(QLatin1String("sets")).toArray();
-        for (const QJsonValue &set : sets)
-            previous << set.toObject();
+    /* Each list is merged on its own, so one that can't be read doesn't hold
+     * back the others. */
+    QStringList failures;
+    const bool prefixFirst = !instance.compatDataPath().isEmpty();
+    for (size_t i = 0; i < all.size(); ++i) {
+        QString why;
+        bool ok = true;
+        if (prefixFirst && i > 0)
+            ok = seed(all.front(), all[i], &why);
+        if (ok)
+            ok = syncOne(all[i], rules, notes, &why);
+        if (!ok)
+            failures << (all.size() == 1 ? why : QStringLiteral("%1: %2").arg(all[i].file, why));
     }
-    if (rules.isEmpty() && previous.isEmpty())
-        return true;
-
-    const QString target = Plugins::lootUserlistPath(instance);
-    QByteArray current;
-    if (QFileInfo::exists(target)) {
-        QFile file(target);
-        if (!file.open(QIODevice::ReadOnly)) {
-            *error = file.errorString();
-            return false;
-        }
-        current = file.readAll();
-    }
-
-    Merged merged;
-    if (!merge(current, rules, previous, &merged, error))
+    if (!failures.isEmpty()) {
+        *error = failures.join(QStringLiteral("; "));
         return false;
-    *notes += merged.notes;
-
-    /* Until the list is written, either set could be what's in it. */
-    QList<QJsonObject> pending = previous;
-    pending << merged.added;
-    if (!Util::writeJson(recordFile, recordOf(pending), error))
-        return false;
-    if (merged.changed) {
-        QDir().mkpath(QFileInfo(target).absolutePath());
-        const QString backup = target + QStringLiteral(".fanmo-backup");
-        if (QFileInfo::exists(target) && !QFileInfo::exists(backup))
-            QFile::copy(target, backup);
-        if (!Util::writeFile(target, merged.text, error))
-            return false;
     }
-    return Util::writeJson(recordFile, recordOf({merged.added}), error);
+    return true;
 }
 
 } /* namespace Userlist */

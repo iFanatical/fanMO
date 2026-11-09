@@ -1799,6 +1799,132 @@ static void testLaunchEnvironment()
     EQ(process.arguments().value(0), QStringLiteral("run"));
 }
 
+static void testNativeTools()
+{
+    CHECK(Launcher::isWindowsProgram(QStringLiteral("/x/LOOT.exe")));
+    CHECK(Launcher::isWindowsProgram(QStringLiteral("SSEEdit.EXE")));
+    CHECK(Launcher::isWindowsProgram(QStringLiteral("setup.bat")));
+    CHECK(!Launcher::isWindowsProgram(QStringLiteral("/opt/loot/LOOT")));
+    CHECK(!Launcher::isWindowsProgram(QStringLiteral("/usr/bin/xedit.sh")));
+
+    Tool loot;
+    loot.exe = QStringLiteral("/opt/loot/LOOT");
+    CHECK(Launcher::isNativeLoot(loot));
+    loot.exe = QStringLiteral("/opt/loot/loot");
+    CHECK(Launcher::isNativeLoot(loot));
+    loot.exe = QStringLiteral("/games/LOOT/LOOT.exe");
+    CHECK(!Launcher::isNativeLoot(loot));
+    loot.exe = QStringLiteral("/opt/loot/LOOT");
+
+    /* LOOT's own default, and an explicit one either way it can be written. */
+    const QByteArray savedXdg = qgetenv("XDG_DATA_HOME");
+    qputenv("XDG_DATA_HOME", "/xdg");
+    EQ(Launcher::nativeLootDataPath(loot), QStringLiteral("/xdg/LOOT"));
+    qunsetenv("XDG_DATA_HOME");
+    EQ(Launcher::nativeLootDataPath(loot), QDir::homePath() + QStringLiteral("/.local/share/LOOT"));
+    if (!savedXdg.isEmpty())
+        qputenv("XDG_DATA_HOME", savedXdg);
+    loot.arguments = QStringLiteral("--auto-sort --loot-data-path=\"/a b/LOOT\"");
+    EQ(Launcher::nativeLootDataPath(loot), QStringLiteral("/a b/LOOT"));
+    loot.arguments = QStringLiteral("--loot-data-path /c/LOOT --auto-sort");
+    EQ(Launcher::nativeLootDataPath(loot), QStringLiteral("/c/LOOT"));
+
+    /* A Linux program runs as itself: no Proton, no Steam variables, and no
+     * Proton needed at all. */
+    Sandbox s;
+    const QString exe = s.dir.path() + QStringLiteral("/loot/LOOT");
+    put(exe, "#!/bin/sh\n");
+    Tool tool;
+    tool.name = QStringLiteral("LOOT");
+    tool.exe = exe;
+    tool.arguments = QStringLiteral("--game=\"Skyrim Special Edition\" --game-path=\"%1\" --auto-sort").arg(s.game);
+    s.inst.setProtonPath(s.dir.path() + QStringLiteral("/no-such-proton"));
+    QProcess process;
+    QString error;
+    CHECK(!Launcher::prepare(s.inst, tool, &process, &error));
+    CHECK(error.contains(QLatin1String("chmod")));
+    QFile::setPermissions(exe, QFile::permissions(exe) | QFileDevice::ExeOwner);
+    error.clear();
+    CHECK(Launcher::prepare(s.inst, tool, &process, &error));
+    EQ(process.program(), exe);
+    EQ(process.arguments(), (QStringList{QStringLiteral("--game=Skyrim Special Edition"),
+                                         QStringLiteral("--game-path=") + s.game,
+                                         QStringLiteral("--auto-sort")}));
+    EQ(process.workingDirectory(), s.dir.path() + QStringLiteral("/loot"));
+    CHECK(!process.processEnvironment().contains(QStringLiteral("STEAM_COMPAT_DATA_PATH"))
+          || qEnvironmentVariableIsSet("STEAM_COMPAT_DATA_PATH"));
+}
+
+static void testUserlistSyncNative()
+{
+    Sandbox s;
+    QString error;
+    QStringList notes;
+    const QString prefixList = Plugins::lootUserlistPath(s.inst);
+    const QString lootData = s.dir.path() + QStringLiteral("/native-loot");
+    const QString nativeList = lootData + QStringLiteral("/games/Skyrim Special Edition/userlist.yaml");
+    const QString name = s.profile.name;
+
+    Tool loot;
+    loot.name = QStringLiteral("LOOT");
+    loot.exe = QStringLiteral("/opt/loot/LOOT");
+    loot.arguments = QStringLiteral("--loot-data-path=\"%1\" --auto-sort").arg(lootData);
+    loot.syncPlugins = true;
+    s.inst.tools().push_back(loot);
+
+    /* Your rule, in Windows LOOT's list from before; then a collection. */
+    put(prefixList, "plugins:\n  - name: Mine.esp\n    after: [ Other.esp ]\n");
+    put(s.inst.profileDir(name) + QStringLiteral("/userlist.yaml"),
+        R"({"globals":[],"groups":[],"plugins":[{"name":"Curated.esp","group":"Dynamic LOD"}]})");
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    for (const QString &file : {prefixList, nativeList}) {
+        const QByteArray text = slurp(file);
+        CHECK(text.contains("Mine.esp"));
+        CHECK(text.contains("Curated.esp"));
+    }
+    EQ(int(notes.size()), 0);
+
+    /* Each list is its own: an edit in native LOOT stays there and survives. */
+    QByteArray edited = slurp(nativeList);
+    edited.replace("Other.esp", "Native.esp");
+    put(nativeList, edited);
+    CHECK(Userlist::sync(s.inst, name, &notes, &error));
+    CHECK(slurp(nativeList).contains("Native.esp"));
+    CHECK(!slurp(prefixList).contains("Native.esp"));
+
+    /* A profile without a collection takes the rules out of both, even out of
+     * the copy: the record came along with it. */
+    Profile plain;
+    plain.name = QStringLiteral("Plain");
+    CHECK(s.inst.saveProfile(plain, &error));
+    CHECK(Userlist::sync(s.inst, plain.name, &notes, &error));
+    CHECK(!slurp(prefixList).contains("Curated.esp"));
+    CHECK(!slurp(nativeList).contains("Curated.esp"));
+    CHECK(slurp(nativeList).contains("Native.esp"));
+    CHECK(slurp(prefixList).contains("Mine.esp"));
+
+    /* A native list that exists already isn't replaced by a copy. */
+    Sandbox t;
+    const QString otherData = t.dir.path() + QStringLiteral("/native-loot");
+    const QString otherList = otherData + QStringLiteral("/games/Skyrim Special Edition/userlist.yaml");
+    loot.arguments = QStringLiteral("--loot-data-path=%1").arg(otherData);
+    t.inst.tools().push_back(loot);
+    put(Plugins::lootUserlistPath(t.inst), "plugins:\n  - name: Windows.esp\n    tag: [ Delev ]\n");
+    put(otherList, "plugins:\n  - name: Linux.esp\n    tag: [ Relev ]\n");
+    CHECK(Userlist::sync(t.inst, t.profile.name, &notes, &error));
+    CHECK(slurp(otherList).contains("Linux.esp"));
+    CHECK(!slurp(otherList).contains("Windows.esp"));
+
+    /* One list it can't read doesn't stop the other, and says which it was. */
+    put(t.inst.profileDir(t.profile.name) + QStringLiteral("/userlist.yaml"),
+        R"({"globals":[],"groups":[],"plugins":[{"name":"Curated.esp","group":"Dynamic LOD"}]})");
+    put(otherList, "plugins:\n  - &a\n    name: Linux.esp\n");
+    error.clear();
+    CHECK(!Userlist::sync(t.inst, t.profile.name, &notes, &error));
+    CHECK(error.contains(otherList));
+    CHECK(slurp(Plugins::lootUserlistPath(t.inst)).contains("Curated.esp"));
+}
+
 static void testHashes()
 {
     EQ(Util::wabbajackHash(0x0123456789abcdefULL), QStringLiteral("782riWdFIwE="));
@@ -1824,6 +1950,7 @@ int main(int argc, char *argv[])
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
         {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
+        {"native tools", testNativeTools}, {"userlist sync native", testUserlistSyncNative},
     };
     for (const auto &t : tests) {
         const int before = failures;

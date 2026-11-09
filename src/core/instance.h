@@ -94,6 +94,7 @@ public:
     QHash<QString, ModInfo> &mods() { return m_mods; }
     const QHash<QString, ModInfo> &mods() const { return m_mods; }
     std::vector<Tool> &tools() { return m_tools; }
+    const std::vector<Tool> &tools() const { return m_tools; }
 
     QStringList profileNames() const;
     bool loadProfile(const QString &name, Profile *out, QString *error) const;

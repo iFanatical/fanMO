@@ -2,7 +2,6 @@
 
 #include "steam.h"
 
-#include <QFileInfo>
 #include <QDir>
 #include <QFileInfo>
 #include <QProcessEnvironment>
@@ -14,6 +13,36 @@ QString resolveExe(const Instance &instance, const Tool &tool)
     if (QFileInfo(tool.exe).isAbsolute())
         return tool.exe;
     return instance.gamePath() + QLatin1Char('/') + tool.exe;
+}
+
+bool isWindowsProgram(const QString &exe)
+{
+    static const QStringList windows{QStringLiteral("exe"), QStringLiteral("bat"), QStringLiteral("cmd"),
+                                     QStringLiteral("com"), QStringLiteral("msi")};
+    return windows.contains(QFileInfo(exe).suffix().toLower());
+}
+
+bool isNativeLoot(const Tool &tool)
+{
+    return !isWindowsProgram(tool.exe)
+        && QFileInfo(tool.exe).fileName().compare(QLatin1String("LOOT"), Qt::CaseInsensitive) == 0;
+}
+
+QString nativeLootDataPath(const Tool &tool)
+{
+    const QStringList args = splitArguments(tool.arguments);
+    const QString flag = QStringLiteral("--loot-data-path");
+    for (qsizetype i = 0; i < args.size(); ++i) {
+        if (args[i].startsWith(flag + QLatin1Char('=')))
+            return args[i].mid(flag.size() + 1);
+        if (args[i] == flag && i + 1 < args.size())
+            return args[i + 1];
+    }
+    /* LOOT's getLocalAppDataPath() on Linux. */
+    QString base = qEnvironmentVariable("XDG_DATA_HOME");
+    if (base.isEmpty())
+        base = QDir::homePath() + QStringLiteral("/.local/share");
+    return base + QStringLiteral("/LOOT");
 }
 
 QStringList splitArguments(const QString &text)
@@ -47,6 +76,20 @@ bool prepare(const Instance &instance, const Tool &tool, QProcess *process, QStr
         *error = QStringLiteral("%1 not found at %2").arg(tool.name, exe);
         return false;
     }
+    const QString workingDir = tool.workingDir.isEmpty() ? QFileInfo(exe).absolutePath() : tool.workingDir;
+    if (!isWindowsProgram(exe)) {
+        if (!QFileInfo(exe).isExecutable()) {
+            *error = QStringLiteral("%1 isn't executable: chmod +x %2").arg(tool.name, exe);
+            return false;
+        }
+        /* A Linux program finds the game and the prefix itself, or from its
+         * arguments: Steam's variables would only mislead it. */
+        process->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
+        process->setProgram(exe);
+        process->setArguments(splitArguments(tool.arguments));
+        process->setWorkingDirectory(workingDir);
+        return true;
+    }
     if (!QFileInfo::exists(instance.protonPath())) {
         *error = QStringLiteral("Proton not found at %1; set it in Settings").arg(instance.protonPath());
         return false;
@@ -72,8 +115,7 @@ bool prepare(const Instance &instance, const Tool &tool, QProcess *process, QStr
     process->setProcessEnvironment(env);
     process->setProgram(instance.protonPath());
     process->setArguments(QStringList{QStringLiteral("run"), exe} + splitArguments(tool.arguments));
-    process->setWorkingDirectory(tool.workingDir.isEmpty() ? QFileInfo(exe).absolutePath()
-                                                           : tool.workingDir);
+    process->setWorkingDirectory(workingDir);
     return true;
 }
 
