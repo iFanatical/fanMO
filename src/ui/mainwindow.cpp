@@ -246,6 +246,9 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 /* Every mod fanMO opens on Nexus is Skyrim SE's. */
 static const QLatin1String nexusDomain("skyrimspecialedition");
 
+/* Between endorsements in a batch. */
+static constexpr int endorsePauseMs = 1000;
+
 struct FetchedEndorsements {
     std::optional<QHash<qint64, Nexus::Endorsement>> votes;
     QString error;
@@ -1485,6 +1488,10 @@ void MainWindow::endorseMods(const QList<int> &rows, bool endorse)
         Nexus::Client client(key);
         int refused = 0;
         for (qsizetype i = 0; i < votes.size(); ++i) {
+            /* A second between votes keeps a batch at a person's pace for
+             * Nexus. The wait watches Cancel, so stopping stays instant. */
+            for (int waited = 0; i > 0 && waited < endorsePauseMs && !(c.cancel && *c.cancel); waited += 50)
+                QThread::msleep(50);
             if (c.cancel && *c.cancel) {
                 *error = QStringLiteral("cancelled");
                 return false;

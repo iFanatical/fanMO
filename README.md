@@ -52,7 +52,7 @@ and 7-Zip at runtime.
 
 Releases are tagged source: take the latest from the
 [Releases page](https://github.com/iFanatical/fanMO/releases), or
-`git clone` and `git checkout v0.1.0`. What changed in each is in
+`git clone` and check out the newest tag. What changed in each is in
 [CHANGELOG.md](CHANGELOG.md), and `fanmo --version` says which you have.
 
 ```sh

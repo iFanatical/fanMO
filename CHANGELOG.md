@@ -3,6 +3,13 @@
 fanMO's releases, newest first. Versions follow `MAJOR.MINOR.PATCH`; while
 it's 0.x, a minor release can change how things work.
 
+## 0.1.1 — 2026-11-09
+
+- Endorsing a batch of mods now waits one second between requests, so a
+  whole collection's worth goes to Nexus at a steady, person-like pace.
+  A single endorsement still goes through at once, and Cancel stops a batch
+  straight away.
+
 ## 0.1.0 — 2026-11-09
 
 The first release: a native C++/Qt 6 mod organizer for Skyrim Special Edition
