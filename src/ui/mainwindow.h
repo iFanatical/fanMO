@@ -102,6 +102,12 @@ private:
     void createModFromOverwrite();
     void captureUnmanaged();
     void nextLink();
+    /* The Nexus key for this session, asking for the password (or, for a
+     * key 0.1 left in plain text, a password to protect it) when there's a
+     * key on disk not unlocked yet. Empty when there's none or it stays locked. */
+    QString ensureNexusKey();
+    /* Nexus has become usable: what waited for it runs now. */
+    void nexusKeyReady();
     QString endorsementsPath() const;
     void loadEndorsements();
     void refreshEndorsements(bool announce);
@@ -147,6 +153,8 @@ private:
 
     QFutureWatcher<Scan> m_scanWatcher;
     bool m_fetchingEndorsements = false;
+    bool m_askingForKey = false;
+    QStringList m_pendingLookup;   /* mods to describe from Nexus once it's unlocked */
     bool m_rescanPending = false;
     QTimer *m_rescanTimer;
     QStringList m_unmanaged;

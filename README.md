@@ -47,8 +47,8 @@ programs, a native LOOT among them, run directly.
 
 ## Build
 
-Needs Qt 6 (Core, Gui, Widgets, Network, Concurrent), bzip2, zlib and xxhash,
-and 7-Zip at runtime.
+Needs Qt 6 (Core, Gui, Widgets, Network, Concurrent), OpenSSL's libcrypto,
+bzip2, zlib and xxhash, and 7-Zip at runtime.
 
 Releases are tagged source: take the latest from the
 [Releases page](https://github.com/iFanatical/fanMO/releases), or
@@ -69,7 +69,18 @@ fanMO finds Skyrim through Steam and asks where the instance should go. An
 instance holds mods, downloads and profiles, and must be on the same drive as
 the game, because hard links can't cross filesystems.
 
-Add your Nexus API key in Settings. With Premium, collection downloads run on
+fanMO talks to Nexus with your personal API key, from nexusmods.com, Site
+preferences, API Keys. It isn't a registered Nexus application, so there's no
+sign-in through the browser. Add the key in Settings, with a password to
+protect it.
+The key is kept encrypted (AES-256-GCM, its key derived from the password by
+scrypt) in `~/.config/fanMO/nexus.key.sealed`, never in plain text, and fanMO
+asks for the password when it opens. Choose Not now to work without Nexus; Game,
+Unlock Nexus, asks again, and a download from the browser asks by itself. A
+forgotten password can't be recovered: Forgot password removes the key so you
+can enter it again. `fanmo-cli` asks for the password in the terminal.
+
+With Premium, collection downloads run on
 their own. On a free account Nexus requires a click per file: the Collection
 tab lists what's needed and opens the pages, and archives already on disk (see
 Archive folders in Settings) are found by MD5 and never downloaded.

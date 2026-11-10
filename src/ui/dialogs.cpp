@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QApplication>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -160,16 +161,29 @@ SettingsDialog::SettingsDialog(Instance &instance, QWidget *parent)
     auto *layout = new QVBoxLayout(this);
 
     auto *form = new QFormLayout;
+    const bool locked = Nexus::keyState() == Nexus::KeyState::Sealed && Nexus::loadKey().isEmpty();
     m_key = new QLineEdit(Nexus::loadKey());
     m_key->setEchoMode(QLineEdit::Password);
-    m_key->setPlaceholderText(QStringLiteral("From nexusmods.com → Site preferences → API Keys"));
+    m_key->setPlaceholderText(locked ? QStringLiteral("Locked: unlock Nexus from the Game menu to change it")
+                                     : QStringLiteral("From nexusmods.com → Site preferences → API Keys"));
     auto *check = new QPushButton(QStringLiteral("Check"));
     auto *keyRow = new QHBoxLayout;
     keyRow->addWidget(m_key, 1);
     keyRow->addWidget(check);
     form->addRow(QStringLiteral("Nexus API key"), keyRow);
-    m_keyStatus = new QLabel;
+    /* The key is kept sealed under this password, and asked for once a session. */
+    m_password = new QLineEdit;
+    m_password->setEchoMode(QLineEdit::Password);
+    m_password->setPlaceholderText(QStringLiteral("Protects the key; needed to set or change it"));
+    form->addRow(QStringLiteral("Password"), m_password);
+    m_confirm = new QLineEdit;
+    m_confirm->setEchoMode(QLineEdit::Password);
+    m_confirm->setPlaceholderText(QStringLiteral("The same password again"));
+    form->addRow(QStringLiteral("Confirm"), m_confirm);
+    m_keyStatus = new QLabel(QStringLiteral(
+        "fanMO asks for this password when it opens. Leave both blank to keep the current one."));
     m_keyStatus->setObjectName(QStringLiteral("muted"));
+    m_keyStatus->setWordWrap(true);
     form->addRow(QString(), m_keyStatus);
 
     m_proton = new QComboBox;
@@ -309,9 +323,35 @@ void SettingsDialog::checkKey()
 void SettingsDialog::save()
 {
     QString error;
-    if (m_key->text().trimmed() != Nexus::loadKey() && !Nexus::saveKey(m_key->text(), &error)) {
-        QMessageBox::warning(this, QStringLiteral("fanMO"), error);
-        return;
+    const QString key = m_key->text().trimmed();
+    const QString password = m_password->text();
+    if (!password.isEmpty() || !m_confirm->text().isEmpty()) {
+        /* A password typed: seal the key under it, new key or not. */
+        if (password != m_confirm->text()) {
+            QMessageBox::warning(this, QStringLiteral("fanMO"), QStringLiteral("The two passwords don't match."));
+            return;
+        }
+        if (key.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("fanMO"), QStringLiteral("Enter the API key to protect."));
+            return;
+        }
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        const bool saved = Nexus::saveKey(key, password, &error);
+        QApplication::restoreOverrideCursor();
+        if (!saved) {
+            QMessageBox::warning(this, QStringLiteral("fanMO"), error);
+            return;
+        }
+    } else if (key != Nexus::loadKey()) {
+        if (!key.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("fanMO"),
+                                 QStringLiteral("Choose a password to protect the new key."));
+            return;
+        }
+        if (QMessageBox::question(this, QStringLiteral("fanMO"), QStringLiteral("Remove your Nexus API key from fanMO?"))
+            != QMessageBox::Yes)
+            return;
+        Nexus::forgetKey();
     }
     m_instance.setProtonPath(m_proton->currentData().toString());
     QStringList folders;
@@ -391,4 +431,104 @@ CollectionDialog::CollectionDialog(const Instance &instance, const QString &pref
 CollectionRequest CollectionDialog::request() const
 {
     return {m_source->currentText().trimmed(), m_profile->text().trimmed(), m_optional->isChecked()};
+}
+
+UnlockDialog::UnlockDialog(QWidget *parent) : QDialog(parent)
+{
+    setWindowTitle(QStringLiteral("Unlock Nexus"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(QStringLiteral(
+        "Your Nexus API key is protected by your fanMO password. Enter it to use Nexus this session: "
+        "downloads, collections and endorsements."));
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    m_password = new QLineEdit;
+    m_password->setEchoMode(QLineEdit::Password);
+    m_password->setPlaceholderText(QStringLiteral("Password"));
+    layout->addWidget(m_password);
+    m_error = new QLabel;
+    m_error->setObjectName(QStringLiteral("muted"));
+    layout->addWidget(m_error);
+    auto *buttons = new QDialogButtonBox;
+    auto *unlock = buttons->addButton(QStringLiteral("Unlock"), QDialogButtonBox::AcceptRole);
+    unlock->setObjectName(QStringLiteral("suggested"));
+    unlock->setDefault(true);
+    buttons->addButton(QStringLiteral("Not now"), QDialogButtonBox::RejectRole);
+    auto *forget = buttons->addButton(QStringLiteral("Forgot password…"), QDialogButtonBox::ResetRole);
+    layout->addWidget(buttons);
+    connect(unlock, &QPushButton::clicked, this, &UnlockDialog::unlock);
+    connect(forget, &QPushButton::clicked, this, &UnlockDialog::forget);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    resize(440, sizeHint().height());
+}
+
+void UnlockDialog::unlock()
+{
+    QString error;
+    /* scrypt takes a moment on purpose. */
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool ok = Nexus::unlockKey(m_password->text(), &error);
+    QApplication::restoreOverrideCursor();
+    if (ok) {
+        accept();
+        return;
+    }
+    m_error->setText(error == QLatin1String("wrong password") ? QStringLiteral("Wrong password.") : error);
+    m_password->clear();
+    m_password->setFocus();
+}
+
+void UnlockDialog::forget()
+{
+    if (QMessageBox::question(this, QStringLiteral("Forgot password"),
+                              QStringLiteral("The key can't be recovered without the password. Remove it from fanMO? "
+                                             "You can enter it again, with a new password, in Settings."))
+        != QMessageBox::Yes)
+        return;
+    Nexus::forgetKey();
+    m_forgot = true;
+    accept();
+}
+
+ProtectKeyDialog::ProtectKeyDialog(QWidget *parent) : QDialog(parent)
+{
+    setWindowTitle(QStringLiteral("Protect your Nexus API key"));
+    auto *layout = new QVBoxLayout(this);
+    auto *intro = new QLabel(QStringLiteral(
+        "fanMO now keeps your Nexus API key encrypted. Choose a password for it: fanMO will ask for it "
+        "when it opens, and the plain-text copy is deleted."));
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    m_password = new QLineEdit;
+    m_password->setEchoMode(QLineEdit::Password);
+    m_password->setPlaceholderText(QStringLiteral("Password"));
+    layout->addWidget(m_password);
+    m_confirm = new QLineEdit;
+    m_confirm->setEchoMode(QLineEdit::Password);
+    m_confirm->setPlaceholderText(QStringLiteral("The same password again"));
+    layout->addWidget(m_confirm);
+    m_error = new QLabel;
+    m_error->setObjectName(QStringLiteral("muted"));
+    layout->addWidget(m_error);
+    auto *buttons = new QDialogButtonBox;
+    auto *protect = buttons->addButton(QStringLiteral("Protect"), QDialogButtonBox::AcceptRole);
+    protect->setObjectName(QStringLiteral("suggested"));
+    protect->setDefault(true);
+    buttons->addButton(QStringLiteral("Not now"), QDialogButtonBox::RejectRole);
+    layout->addWidget(buttons);
+    connect(protect, &QPushButton::clicked, this, [this] {
+        if (m_password->text().isEmpty())
+            m_error->setText(QStringLiteral("Choose a password."));
+        else if (m_password->text() != m_confirm->text())
+            m_error->setText(QStringLiteral("The two passwords don't match."));
+        else
+            accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    resize(440, sizeHint().height());
+}
+
+QString ProtectKeyDialog::password() const
+{
+    return m_password->text();
 }

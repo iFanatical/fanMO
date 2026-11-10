@@ -44,6 +44,8 @@ private:
 
     Instance &m_instance;
     QLineEdit *m_key;
+    QLineEdit *m_password;
+    QLineEdit *m_confirm;
     QLabel *m_keyStatus;
     QComboBox *m_proton;
     QTableWidget *m_folders;
@@ -66,6 +68,36 @@ private:
     QComboBox *m_source;
     QLineEdit *m_profile;
     QCheckBox *m_optional;
+};
+
+/* The password that unlocks the Nexus API key for this session. */
+class UnlockDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit UnlockDialog(QWidget *parent = nullptr);
+    /* The key was removed instead: the password was forgotten. */
+    bool forgot() const { return m_forgot; }
+
+private:
+    void unlock();
+    void forget();
+
+    QLineEdit *m_password;
+    QLabel *m_error;
+    bool m_forgot = false;
+};
+
+/* A password, typed twice, for a key 0.1 kept in plain text. */
+class ProtectKeyDialog : public QDialog {
+    Q_OBJECT
+public:
+    explicit ProtectKeyDialog(QWidget *parent = nullptr);
+    QString password() const;
+
+private:
+    QLineEdit *m_password;
+    QLineEdit *m_confirm;
+    QLabel *m_error;
 };
 
 #endif

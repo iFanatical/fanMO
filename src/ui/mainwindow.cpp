@@ -181,6 +181,13 @@ void MainWindow::buildUi()
         QDesktopServices::openUrl(QUrl::fromLocalFile(m_instance.root()));
     });
     moreMenu->addAction(QStringLiteral("Refresh endorsements"), this, [this] { refreshEndorsements(true); });
+    QAction *unlockNexus = moreMenu->addAction(QStringLiteral("Unlock Nexus…"), this, [this] {
+        if (!ensureNexusKey().isEmpty())
+            nexusKeyReady();
+    });
+    connect(moreMenu, &QMenu::aboutToShow, this, [unlockNexus] {
+        unlockNexus->setEnabled(Nexus::keyState() != Nexus::KeyState::None && Nexus::loadKey().isEmpty());
+    });
     moreMenu->addSeparator();
     moreMenu->addAction(QStringLiteral("Purge deployment…"), this, &MainWindow::purge);
     moreButton->setMenu(moreMenu);
@@ -497,20 +504,65 @@ bool MainWindow::openInstance(const QString &path)
     setDirty(!QFileInfo::exists(m_instance.statePath() + QStringLiteral("/deployment.json")));
     refreshDownloads();
     loadEndorsements();
-    refreshEndorsements(false);
     /* An archive's name gives the id and version; Nexus has the rest. */
-    const QString key = Nexus::loadKey();
-    if (!resolved.isEmpty() && !key.isEmpty()) {
-        Instance *instance = &m_instance;
-        auto *job = new Job(QStringLiteral("Looking up"), [instance, resolved, key](const Engine::Callbacks &c, QString *err) {
-            return Engine::describeFromNexus(*instance, resolved, key, c, err);
-        }, this);
-        startJob(QStringLiteral("Looking up %1 mods on Nexus").arg(resolved.size()), job,
-                 [this](bool, const QString &) { showRows(); });
-        return true;
-    }
+    m_pendingLookup = resolved;
+    /* Asked once the window is up, not before it. */
+    if (Nexus::keyState() != Nexus::KeyState::None)
+        QTimer::singleShot(0, this, [this] {
+            if (!ensureNexusKey().isEmpty())
+                nexusKeyReady();
+        });
     nextLink();
     return true;
+}
+
+QString MainWindow::ensureNexusKey()
+{
+    const QString key = Nexus::loadKey();
+    if (!key.isEmpty() || m_askingForKey)
+        return key;
+    const Nexus::KeyState state = Nexus::keyState();
+    if (state == Nexus::KeyState::None)
+        return {};
+    /* One dialog at a time, however many downloads arrive behind it. */
+    m_askingForKey = true;
+    if (state == Nexus::KeyState::Plain) {
+        ProtectKeyDialog dialog(this);
+        const bool protect = dialog.exec() == QDialog::Accepted;
+        Nexus::usePlainKey();
+        QString error;
+        if (!protect)
+            log(QStringLiteral("Using your unprotected Nexus API key for this session; fanMO will ask again next time"));
+        else if (Nexus::saveKey(Nexus::loadKey(), dialog.password(), &error))
+            log(QStringLiteral("Your Nexus API key is now encrypted, and the plain-text copy deleted"));
+        else
+            log(QStringLiteral("Couldn't protect the Nexus API key (%1); using it unprotected this session").arg(error));
+    } else {
+        UnlockDialog dialog(this);
+        dialog.exec();
+        if (dialog.forgot())
+            log(QStringLiteral("Nexus API key removed; enter it again, with a new password, in Settings"));
+    }
+    m_askingForKey = false;
+    return Nexus::loadKey();
+}
+
+void MainWindow::nexusKeyReady()
+{
+    refreshEndorsements(false);
+    const QString key = Nexus::loadKey();
+    if (!m_pendingLookup.isEmpty() && !key.isEmpty() && !busy()) {
+        const QStringList folders = std::exchange(m_pendingLookup, {});
+        Instance *instance = &m_instance;
+        auto *job = new Job(QStringLiteral("Looking up"), [instance, folders, key](const Engine::Callbacks &c, QString *err) {
+            return Engine::describeFromNexus(*instance, folders, key, c, err);
+        }, this);
+        /* Its finish moves the download queue on. */
+        startJob(QStringLiteral("Looking up %1 mods on Nexus").arg(folders.size()), job,
+                 [this](bool, const QString &) { showRows(); });
+        return;
+    }
+    nextLink();
 }
 
 void MainWindow::fillProfiles()
@@ -1195,7 +1247,7 @@ void MainWindow::runCollection(const QString &source, const QString &profile, bo
 {
     storeProfile();
     Instance *instance = &m_instance;
-    const QString apiKey = Nexus::loadKey();
+    const QString apiKey = ensureNexusKey();
     auto result = std::make_shared<Engine::CollectionResult>();
     auto manifest = std::make_shared<Collection::Manifest>();
     auto *job = new Job(QStringLiteral("Installing collection"),
@@ -1288,7 +1340,7 @@ void MainWindow::installWabbajack()
         if (!accepted || profile.isEmpty())
             return;
         Instance *instance = &m_instance;
-        const QString apiKey = Nexus::loadKey();
+        const QString apiKey = ensureNexusKey();
         auto result = std::make_shared<Wabbajack::Result>();
         auto *install = new Job(QStringLiteral("Installing list"), [=](const Engine::Callbacks &c, QString *err) {
             Wabbajack::Options options;
@@ -1314,9 +1366,13 @@ void MainWindow::openSettings()
 {
     if (!m_hasInstance || busy())
         return;
+    const bool hadKey = !Nexus::loadKey().isEmpty();
     SettingsDialog dialog(m_instance, this);
-    if (dialog.exec() == QDialog::Accepted)
-        fillTools();
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    fillTools();
+    if (!hadKey && !Nexus::loadKey().isEmpty())
+        nexusKeyReady();
 }
 
 void MainWindow::newProfile(bool copy)
@@ -1394,7 +1450,8 @@ void MainWindow::modMenu(const QPoint &pos)
     const auto toEndorse = m_mods->votes(rows, true);
     const auto toAbstain = m_mods->votes(rows, false);
     if (std::any_of(rows.begin(), rows.end(), [this](int r) { return m_mods->rows()[size_t(r)].nexusModId > 0; })) {
-        const bool haveKey = !Nexus::loadKey().isEmpty();
+        /* A locked key counts: choosing Endorse asks for the password. */
+        const bool haveKey = Nexus::keyState() != Nexus::KeyState::None;
         const auto label = [](const QString &verb, qsizetype n) {
             return n > 1 ? QStringLiteral("%1 %2 mods").arg(verb).arg(n) : verb;
         };
@@ -1449,10 +1506,13 @@ void MainWindow::refreshEndorsements(bool announce)
 {
     if (!m_hasInstance || m_fetchingEndorsements)
         return;
-    const QString key = Nexus::loadKey();
+    /* Only asked for, never prompted for behind the person's back. */
+    const QString key = announce ? ensureNexusKey() : Nexus::loadKey();
     if (key.isEmpty()) {
         if (announce)
-            log(QStringLiteral("Set a Nexus API key in Settings to see your endorsements"));
+            log(Nexus::keyState() == Nexus::KeyState::None
+                    ? QStringLiteral("Set a Nexus API key in Settings to see your endorsements")
+                    : QStringLiteral("Nexus is locked; unlock it from the Game menu to see your endorsements"));
         return;
     }
     m_fetchingEndorsements = true;
@@ -1490,9 +1550,10 @@ void MainWindow::endorseMods(const QList<int> &rows, bool endorse)
     const QList<ModListModel::Vote> votes = m_mods->votes(rows, endorse);
     if (votes.isEmpty())
         return;
-    const QString key = Nexus::loadKey();
+    const QString key = ensureNexusKey();
     if (key.isEmpty()) {
-        log(QStringLiteral("Set a Nexus API key in Settings to endorse mods"));
+        log(Nexus::keyState() == Nexus::KeyState::None ? QStringLiteral("Set a Nexus API key in Settings to endorse mods")
+                                                      : QStringLiteral("Nexus is locked, so nothing was endorsed"));
         return;
     }
     auto results = std::make_shared<QHash<qint64, Nexus::Endorsement>>();
@@ -1690,9 +1751,21 @@ void MainWindow::nextLink()
         nextLink();
         return;
     }
-    const QString key = Nexus::loadKey();
+    QString key = Nexus::loadKey();
     if (key.isEmpty()) {
-        log(QStringLiteral("a download link arrived, but no Nexus API key is set"));
+        if (Nexus::keyState() == Nexus::KeyState::None) {
+            log(QStringLiteral("a download link arrived, but no Nexus API key is set"));
+            return;
+        }
+        /* Kept, not dropped: it goes as soon as Nexus is unlocked. */
+        m_links.prepend(url);
+        if (m_askingForKey)
+            return;
+        if (ensureNexusKey().isEmpty()) {
+            log(QStringLiteral("A download is waiting: unlock Nexus from the Game menu to start it"));
+            return;
+        }
+        nexusKeyReady();
         return;
     }
     Instance *instance = &m_instance;

@@ -7,6 +7,7 @@
 #include "core/fomod.h"
 #include "core/installer.h"
 #include "core/instance.h"
+#include "core/keystore.h"
 #include "core/launcher.h"
 #include "core/nexus.h"
 #include "core/patch.h"
@@ -1589,6 +1590,74 @@ static void testDownloadMeta()
     EQ(Engine::resolveNexusIds(s.inst).size(), qsizetype(0));   /* nothing left to do */
 }
 
+static void testKeyStore()
+{
+    QString error;
+    const QString secret = QStringLiteral("abcDEF123456789-nexus-key==");
+    const QByteArray sealed = KeyStore::seal(secret, QStringLiteral("correct horse"), &error);
+    CHECK(!sealed.isEmpty());
+    CHECK(!sealed.contains(secret.toUtf8()));
+    const auto opened = KeyStore::open(sealed, QStringLiteral("correct horse"), &error);
+    CHECK(opened && *opened == secret);
+    CHECK(!KeyStore::open(sealed, QStringLiteral("Correct horse"), &error));
+    EQ(error, QStringLiteral("wrong password"));
+    /* Fresh salt and nonce each time: the same secret never seals the same. */
+    CHECK(KeyStore::seal(secret, QStringLiteral("correct horse"), &error) != sealed);
+
+    /* Any change to what was sealed is caught by the tag. */
+    QJsonObject o = QJsonDocument::fromJson(sealed).object();
+    QByteArray data = QByteArray::fromBase64(o.value(QStringLiteral("data")).toString().toLatin1());
+    data[0] = char(data[0] ^ 1);
+    QJsonObject tampered = o;
+    tampered[QStringLiteral("data")] = QString::fromLatin1(data.toBase64());
+    CHECK(!KeyStore::open(QJsonDocument(tampered).toJson(), QStringLiteral("correct horse"), &error));
+    /* A file can't make open() spend whatever memory it names. */
+    QJsonObject greedy = o;
+    greedy[QStringLiteral("n")] = qint64(1) << 30;
+    CHECK(!KeyStore::open(QJsonDocument(greedy).toJson(), QStringLiteral("correct horse"), &error));
+    EQ(error, QStringLiteral("the sealed key is damaged"));
+    CHECK(!KeyStore::open("{}", QStringLiteral("correct horse"), &error));
+
+    /* The key's life in fanMO's config folder. */
+    QTemporaryDir config;
+    const QByteArray previous = qgetenv("XDG_CONFIG_HOME");
+    qputenv("XDG_CONFIG_HOME", QFile::encodeName(config.path()));
+    CHECK(Nexus::keyState() == Nexus::KeyState::None);
+    CHECK(Nexus::loadKey().isEmpty());
+
+    /* Sealed on disk, locked until the right password. */
+    put(Nexus::sealedKeyFile(), sealed);
+    CHECK(Nexus::keyState() == Nexus::KeyState::Sealed);
+    CHECK(Nexus::loadKey().isEmpty());
+    CHECK(!Nexus::unlockKey(QStringLiteral("nope"), &error));
+    CHECK(Nexus::loadKey().isEmpty());
+    CHECK(Nexus::unlockKey(QStringLiteral("correct horse"), &error));
+    EQ(Nexus::loadKey(), secret);
+    Nexus::forgetKey();
+    CHECK(Nexus::keyState() == Nexus::KeyState::None);
+    CHECK(Nexus::loadKey().isEmpty());
+
+    /* A 0.1 plain-text key, used for a session, then sealed and deleted. */
+    put(Nexus::keyFile(), "plain-key-from-0.1\n");
+    CHECK(Nexus::keyState() == Nexus::KeyState::Plain);
+    CHECK(Nexus::usePlainKey());
+    EQ(Nexus::loadKey(), QStringLiteral("plain-key-from-0.1"));
+    CHECK(Nexus::saveKey(Nexus::loadKey(), QStringLiteral("hunter2"), &error));
+    CHECK(Nexus::keyState() == Nexus::KeyState::Sealed);
+    CHECK(!QFileInfo::exists(Nexus::keyFile()));
+    EQ(QFileInfo(Nexus::sealedKeyFile()).permissions() & (QFile::ReadGroup | QFile::ReadOther | QFile::WriteGroup | QFile::WriteOther),
+       QFileDevice::Permissions());
+    CHECK(!slurp(Nexus::sealedKeyFile()).contains("plain-key-from-0.1"));
+    EQ(Nexus::loadKey(), QStringLiteral("plain-key-from-0.1"));
+    CHECK(!Nexus::saveKey(QStringLiteral("key"), QString(), &error));   /* never without a password */
+    Nexus::forgetKey();
+
+    if (previous.isNull())
+        qunsetenv("XDG_CONFIG_HOME");
+    else
+        qputenv("XDG_CONFIG_HOME", previous);
+}
+
 static void testNxm()
 {
     auto l = Nexus::parseNxm(QStringLiteral("nxm://skyrimspecialedition/mods/266/files/123?key=abc&expires=99&user_id=7"));
@@ -2110,7 +2179,7 @@ int main(int argc, char *argv[])
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"download meta", testDownloadMeta}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"download meta", testDownloadMeta}, {"key store", testKeyStore}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
         {"native tools", testNativeTools}, {"userlist sync native", testUserlistSyncNative},
     };
     for (const auto &t : tests) {

@@ -1,4 +1,5 @@
 #include "nexus.h"
+#include "keystore.h"
 #include "version.h"
 
 #include <QCoreApplication>
@@ -7,6 +8,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QMutex>
 #include <QNetworkReply>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -25,18 +27,77 @@ QString keyFile()
         + QStringLiteral("/fanMO/nexus.key");
 }
 
-QString loadKey()
+QString sealedKeyFile()
 {
-    QFile f(keyFile());
-    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed() : QString();
+    return keyFile() + QStringLiteral(".sealed");
 }
 
-bool saveKey(const QString &key, QString *error)
+KeyState keyState()
 {
-    if (!Util::writeFile(keyFile(), key.trimmed().toUtf8(), error))
+    if (QFileInfo::exists(sealedKeyFile()))
+        return KeyState::Sealed;
+    return QFileInfo::exists(keyFile()) ? KeyState::Plain : KeyState::None;
+}
+
+static QMutex sessionMutex;
+static QString sessionKey;
+
+static void setSessionKey(const QString &key)
+{
+    QMutexLocker lock(&sessionMutex);
+    sessionKey = key;
+}
+
+QString loadKey()
+{
+    QMutexLocker lock(&sessionMutex);
+    return sessionKey;
+}
+
+bool unlockKey(const QString &password, QString *error)
+{
+    QFile f(sealedKeyFile());
+    if (!f.open(QIODevice::ReadOnly)) {
+        *error = QStringLiteral("no sealed key to unlock");
         return false;
-    QFile::setPermissions(keyFile(), QFile::ReadOwner | QFile::WriteOwner);
+    }
+    const auto key = KeyStore::open(f.readAll(), password, error);
+    if (!key)
+        return false;
+    setSessionKey(*key);
     return true;
+}
+
+bool usePlainKey()
+{
+    QFile f(keyFile());
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    setSessionKey(QString::fromUtf8(f.readAll()).trimmed());
+    return !loadKey().isEmpty();
+}
+
+bool saveKey(const QString &key, const QString &password, QString *error)
+{
+    const QString trimmed = key.trimmed();
+    if (trimmed.isEmpty() || password.isEmpty()) {
+        *error = QStringLiteral("a key and a password are both needed");
+        return false;
+    }
+    const QByteArray sealed = KeyStore::seal(trimmed, password, error);
+    if (sealed.isEmpty() || !Util::writeFile(sealedKeyFile(), sealed, error))
+        return false;
+    QFile::setPermissions(sealedKeyFile(), QFile::ReadOwner | QFile::WriteOwner);
+    QFile::remove(keyFile());
+    setSessionKey(trimmed);
+    return true;
+}
+
+void forgetKey()
+{
+    QFile::remove(sealedKeyFile());
+    QFile::remove(keyFile());
+    setSessionKey(QString());
 }
 
 NxmLink parseNxm(const QString &text)

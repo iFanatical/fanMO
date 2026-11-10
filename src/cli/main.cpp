@@ -29,11 +29,69 @@
 #include <QtConcurrent>
 
 #include <cstdio>
+#include <cstring>
 #include <iostream>
+
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
 
 static void say(const QString &s)
 {
     std::cout << s.toStdString() << std::endl;
+}
+
+/* A password from the terminal itself, not echoed: piped input never answers. */
+static QString askPassword(const char *prompt)
+{
+    const int tty = ::open("/dev/tty", O_RDWR | O_NOCTTY);
+    if (tty < 0)
+        return {};
+    if (::write(tty, prompt, std::strlen(prompt)) < 0) {}
+    termios saved{}, quiet{};
+    const bool canHide = tcgetattr(tty, &saved) == 0;
+    if (canHide) {
+        quiet = saved;
+        quiet.c_lflag &= ~tcflag_t(ECHO);
+        tcsetattr(tty, TCSAFLUSH, &quiet);
+    }
+    QByteArray line;
+    char c;
+    while (::read(tty, &c, 1) == 1 && c != '\n')
+        line.append(c);
+    if (canHide)
+        tcsetattr(tty, TCSAFLUSH, &saved);
+    if (::write(tty, "\n", 1) < 0) {}
+    ::close(tty);
+    const QString out = QString::fromUtf8(line);
+    line.fill('\0');
+    return out;
+}
+
+/* The Nexus key for this run: unlocked with the password fanMO set. */
+static QString nexusKey()
+{
+    switch (Nexus::keyState()) {
+    case Nexus::KeyState::None:
+        return {};
+    case Nexus::KeyState::Plain:
+        say(QStringLiteral("warning: your Nexus API key is stored unencrypted; open fanMO to protect it with a password"));
+        Nexus::usePlainKey();
+        return Nexus::loadKey();
+    case Nexus::KeyState::Sealed:
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const QString password = askPassword("fanMO password (for the Nexus API key): ");
+            if (password.isEmpty())
+                break;
+            QString error;
+            if (Nexus::unlockKey(password, &error))
+                return Nexus::loadKey();
+            say(error);
+        }
+        say(QStringLiteral("continuing without Nexus"));
+        return {};
+    }
+    return {};
 }
 
 static QString option(QStringList &args, const QString &name, const QString &fallback = {})
@@ -277,7 +335,7 @@ static int installCollection(QStringList args)
     options.profile = option(args, QStringLiteral("--profile"), QStringLiteral("Collection"));
     options.jobs = option(args, QStringLiteral("--jobs"), QStringLiteral("6")).toInt();
     options.includeOptional = !args.contains(QStringLiteral("--no-optional"));
-    options.apiKey = Nexus::loadKey();
+    options.apiKey = nexusKey();
     if (!archives.isEmpty())
         instance.setArchiveFolders(archives.split(QLatin1Char(',')));
 
@@ -496,7 +554,7 @@ static int wabbajackInstall(QStringList args)
         instance.setArchiveFolders(archives.split(QLatin1Char(',')));
     Wabbajack::Options options;
     options.profile = option(args, QStringLiteral("--profile"), QStringLiteral("Wabbajack"));
-    options.apiKey = Nexus::loadKey();
+    options.apiKey = nexusKey();
     options.jobs = option(args, QStringLiteral("--jobs"), QStringLiteral("6")).toInt();
     options.allowMissing = args.contains(QStringLiteral("--allow-missing"));
     options.verifyHashes = args.contains(QStringLiteral("--verify"));

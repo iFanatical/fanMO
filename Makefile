@@ -3,10 +3,11 @@
 # Programs sharing one core: fanmo (the UI), fanmo-cli (the same operations,
 # headless), fanmo-tests and fanmo-uitests.
 #
-# Gentoo: dev-qt/qtbase[network,widgets,concurrent], app-arch/bzip2, sys-libs/zlib,
-#         dev-libs/xxhash, and 7-Zip at runtime (7z or 7zz).
+# Gentoo: dev-qt/qtbase[network,widgets,concurrent], dev-libs/openssl,
+#         app-arch/bzip2, sys-libs/zlib, dev-libs/xxhash, and 7-Zip at
+#         runtime (7z or 7zz).
 
-CORE_PKGS = Qt6Core Qt6Network Qt6Concurrent
+CORE_PKGS = Qt6Core Qt6Network Qt6Concurrent libcrypto
 UI_PKGS   = Qt6Widgets Qt6Gui $(CORE_PKGS)
 
 CXX      ?= g++

@@ -19,10 +19,24 @@
 
 namespace Nexus {
 
-/* Where the key lives: a 0600 file, read by nothing else. */
+/* The API key at rest is sealed under a password of the user's
+ * (KeyStore), in sealedKeyFile(). keyFile() is where 0.1 kept it in plain
+ * text; it's read only to seal it, and removed once sealed. */
 QString keyFile();
+QString sealedKeyFile();
+enum class KeyState { None, Plain, Sealed };
+KeyState keyState();
+
+/* The key for this session: empty until unlockKey() or usePlainKey(). Safe
+ * from any thread. */
 QString loadKey();
-bool saveKey(const QString &key, QString *error);
+bool unlockKey(const QString &password, QString *error);
+/* An unsealed 0.1 key, for this session only. */
+bool usePlainKey();
+/* Seals key under password, removes any plain copy, and unlocks it. */
+bool saveKey(const QString &key, const QString &password, QString *error);
+/* Removes the key from disk and from the session. */
+void forgetKey();
 
 struct NxmLink {
     enum Kind { Invalid, ModFile, Collection } kind = Invalid;
