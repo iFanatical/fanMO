@@ -3,6 +3,15 @@
 fanMO's releases, newest first. Versions follow `MAJOR.MINOR.PATCH`; while
 it's 0.x, a minor release can change how things work.
 
+## 0.1.2 — 2026-11-09
+
+- Much less memory with big collections: about 220 MB with Gate to
+  Sovngarde loaded, down from over 1 GB. Each rescan used to re-read the
+  whole deployment record (61 MB for that collection) to spot unmanaged
+  files; it's now read only after a deploy changes it. Memory freed after a
+  scan, install or deploy is handed back to the system.
+- Rescans after reordering or switching mods take about half as long.
+
 ## 0.1.1 — 2026-11-09
 
 - Endorsing a batch of mods now waits one second between requests, so a

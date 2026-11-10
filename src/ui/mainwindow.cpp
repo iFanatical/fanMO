@@ -51,6 +51,8 @@
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
+#include <malloc.h>
+
 static void setupList(QTreeView *view)
 {
     view->setRootIsDecorated(false);
@@ -241,6 +243,14 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
     fitToolbars();
+}
+
+/* A scan or a deploy of a big collection reads hundreds of megabytes it then
+ * frees, on pool threads with their own malloc arenas. glibc keeps that as
+ * the process's until asked, so ask once the work is done. */
+static void releaseFreedMemory()
+{
+    malloc_trim(0);
 }
 
 /* Every mod fanMO opens on Nexus is Skyrim SE's. */
@@ -640,7 +650,8 @@ void MainWindow::scanFinished()
 {
     if (m_scanWatcher.isCanceled())
         return;
-    Scan scan = m_scanWatcher.result();
+    /* Taken, not copied: the future would otherwise hold a second index. */
+    Scan scan = m_scanWatcher.future().takeResult();
     m_index = std::move(scan.index);
     m_unmanaged = std::move(scan.unmanaged);
     m_mods->setConflicts(m_index);
@@ -668,6 +679,7 @@ void MainWindow::scanFinished()
         m_rescanPending = false;
         scheduleRescan();
     }
+    releaseFreedMemory();
 }
 
 void MainWindow::waitForScan()
@@ -861,6 +873,7 @@ void MainWindow::startJob(const QString &title, Job *job, std::function<void(boo
         log(ok ? QStringLiteral("%1: done").arg(title) : QStringLiteral("%1 failed: %2").arg(title, error));
         done(ok, error);
         updateStatus();
+        releaseFreedMemory();
         nextLink();
     });
     job->start();

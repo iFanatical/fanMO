@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QMutex>
 #include <QThreadPool>
 #include <QtConcurrent>
 
@@ -530,23 +531,64 @@ bool purge(Instance &instance, const Options &options, Report *report, QString *
     return applyDiff(instance, currentManifest(instance), {}, options, report, error);
 }
 
+static quint64 pathHash(const QString &foldedKey)
+{
+    return Util::xxh64Bytes(foldedKey.toUtf8());
+}
+
+/* Identifies one version of a file: each write replaces it (QSaveFile), so a
+ * new inode, and the size and time catch anything else. Absent is all zeros. */
+static QByteArray fileStamp(const QString &path)
+{
+    struct stat st;
+    if (stat(QFile::encodeName(path).constData(), &st) != 0)
+        return QByteArray(32, '\0');
+    QByteArray out;
+    for (const qint64 v : {qint64(st.st_ino), qint64(st.st_size), qint64(st.st_mtim.tv_sec), qint64(st.st_mtim.tv_nsec)})
+        out.append(reinterpret_cast<const char *>(&v), sizeof v);
+    return out;
+}
+
+/* What the game came with and what fanMO deployed, as hashes of folded paths
+ * in Data. The manifest runs to tens of megabytes for a big collection and
+ * every rescan asks, so it's read again only when it or the baseline changes,
+ * and kept as 8 bytes a path rather than the paths themselves. */
+static QSet<quint64> knownFiles(const Instance &instance)
+{
+    static QMutex mutex;
+    static QByteArray cachedStamp;
+    static QSet<quint64> cached;
+    const QByteArray stamp = instance.root().toUtf8() + '\0' + fileStamp(baselinePath(instance))
+                           + fileStamp(journalPath(instance)) + fileStamp(manifestPath(instance));
+    QMutexLocker lock(&mutex);
+    if (stamp == cachedStamp)
+        return cached;
+
+    QSet<quint64> known;
+    {
+        const QJsonArray baseline = Util::readJson(baselinePath(instance)).array();
+        const Manifest m = currentManifest(instance);
+        known.reserve(baseline.size() + m.entries.size());
+        for (const auto &v : baseline)
+            known.insert(pathHash(v.toString()));
+        for (const Entry &e : m.entries) {
+            /* Deployments made before root mods' Data merged list theirs as root. */
+            const QString inData = e.root ? dataPathOf(true, e.rel) : e.rel;
+            if (!inData.isEmpty())
+                known.insert(pathHash(Util::foldKey(inData)));
+        }
+    }
+    cached = known;
+    cachedStamp = stamp;
+    return known;
+}
+
 QStringList unmanagedFiles(const Instance &instance)
 {
-    QSet<QString> known;
-    const QJsonArray baseline = Util::readJson(baselinePath(instance)).array();
-    known.reserve(baseline.size());
-    for (const auto &v : baseline)
-        known.insert(v.toString());
-    const Manifest m = currentManifest(instance);
-    for (const Entry &e : m.entries) {
-        /* Deployments made before root mods' Data merged list theirs as root. */
-        const QString inData = e.root ? dataPathOf(true, e.rel) : e.rel;
-        if (!inData.isEmpty())
-            known.insert(Util::foldKey(inData));
-    }
+    const QSet<quint64> known = knownFiles(instance);
     QStringList out;
     for (const QString &f : Util::walkFiles(instance.dataPath()))
-        if (!known.contains(Util::foldKey(f)))
+        if (!known.contains(pathHash(Util::foldKey(f))))
             out << f;
     return out;
 }
