@@ -3,6 +3,14 @@
 fanMO's releases, newest first. Versions follow `MAJOR.MINOR.PATCH`; while
 it's 0.x, a minor release can change how things work.
 
+## 0.2.1 — 2026-11-10
+
+- Adding LOOT as a tool no longer fills in `--game`, `--game-path` and
+  `--auto-sort`: tools run with only the arguments you give them. Sort and
+  apply in LOOT, then close it, and fanMO reads the order back as before.
+- LOOT is supported through Proton only; the README no longer describes a
+  native Linux build.
+
 ## 0.2.0 — 2026-11-10
 
 - The Nexus API key is encrypted. It's sealed with AES-256-GCM under a

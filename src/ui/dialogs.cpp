@@ -284,22 +284,13 @@ void SettingsDialog::addTool()
     m_tools->insertRow(row);
     m_tools->setItem(row, 0, new QTableWidgetItem(QFileInfo(exe).completeBaseName()));
     m_tools->setItem(row, 1, new QTableWidgetItem(exe));
-    /* LOOT sorts and quits, and told where the game is it needs no setup.
-     * Windows LOOT wants the path as Proton shows it; a native one finds the
-     * prefix, and the Plugins.txt in it, through Steam on its own. */
+    /* No arguments of fanMO's: a tool runs as it would on its own. LOOT is
+     * still recognised, so its order is read back once it closes. */
     Tool picked;
     picked.exe = exe;
-    const bool nativeLoot = Launcher::isNativeLoot(picked);
-    const bool loot = nativeLoot
+    const bool loot = Launcher::isNativeLoot(picked)
         || QFileInfo(exe).fileName().compare(QLatin1String("loot.exe"), Qt::CaseInsensitive) == 0;
-    QString gamePath = m_instance.gamePath();
-    if (!nativeLoot) {
-        gamePath.prepend(QStringLiteral("Z:"));
-        gamePath.replace(QLatin1Char('/'), QLatin1Char('\\'));
-    }
-    m_tools->setItem(row, 2, new QTableWidgetItem(
-        loot ? QStringLiteral("--game=\"Skyrim Special Edition\" --game-path=\"%1\" --auto-sort").arg(gamePath)
-             : QString()));
+    m_tools->setItem(row, 2, new QTableWidgetItem);
     m_tools->setItem(row, 3, new QTableWidgetItem);
     auto *sync = new QTableWidgetItem;
     sync->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);

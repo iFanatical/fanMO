@@ -1138,8 +1138,8 @@ void MainWindow::toolFinished(const Tool &tool, int exitCode, bool crashed, qint
         log(QStringLiteral("load order not read back: %1 didn't finish cleanly, so nothing it did can be trusted")
                 .arg(tool.name));
     } else if (tool.syncPlugins && orderSnapshot(m_instance) == orderBefore) {
-        log(QStringLiteral("%1 didn't change the load order. If it should have sorted, run it without "
-                           "--auto-sort to see what it says").arg(tool.name));
+        log(QStringLiteral("%1 didn't change the load order. If it should have, sort and apply in it "
+                           "before closing it").arg(tool.name));
     } else if (tool.syncPlugins) {
         if (Plugins::read(m_instance, &m_profile, &error)) {
             log(QStringLiteral("load order read back from %1").arg(tool.name));
