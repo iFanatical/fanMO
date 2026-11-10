@@ -3,6 +3,20 @@
 fanMO's releases, newest first. Versions follow `MAJOR.MINOR.PATCH`; while
 it's 0.x, a minor release can change how things work.
 
+## 0.2.0 — 2026-11-10
+
+- The Nexus API key is encrypted. It's sealed with AES-256-GCM under a
+  password you choose (scrypt derives the key), never kept in plain text,
+  and fanMO asks for the password when it opens. Not now works without
+  Nexus until Game, Unlock Nexus; a download from the browser waits for it.
+  A key 0.1 stored in plain text is offered a password on first start.
+  `fanmo-cli` asks for the password in the terminal.
+- fanMO uses personal API keys only, as the README now says.
+- Memory no longer creeps up while the window sits idle: large buffers are
+  handed back the moment they're freed, and freed memory is returned every
+  ten minutes, not only after a scan or a job.
+- Building now needs OpenSSL's libcrypto.
+
 ## 0.1.2 — 2026-11-09
 
 - Much less memory with big collections: about 220 MB with Gate to

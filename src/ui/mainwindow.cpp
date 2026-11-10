@@ -86,6 +86,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_rescanTimer->setInterval(150);
     connect(m_rescanTimer, &QTimer::timeout, this, &MainWindow::rescan);
     connect(&m_scanWatcher, &QFutureWatcher<Scan>::finished, this, &MainWindow::scanFinished);
+    /* Freed memory that ends up between live allocations, from repaints the
+     * compositor asks for with nobody at the window, goes back now and then
+     * too, not only after a scan or a job. */
+    auto *trimTimer = new QTimer(this);
+    trimTimer->setInterval(10 * 60 * 1000);
+    connect(trimTimer, &QTimer::timeout, this, [this] {
+        if (!busy() && !m_scanWatcher.isRunning())
+            malloc_trim(0);
+    });
+    trimTimer->start();
     buildUi();
 
     connect(m_mods, &OrderedModel::orderChanged, this, [this] { setDirty(true); storeProfile(); scheduleRescan(); });

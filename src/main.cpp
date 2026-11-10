@@ -12,6 +12,8 @@
 #include <QSettings>
 #include <QTimer>
 
+#include <malloc.h>
+
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
@@ -41,6 +43,11 @@ int main(int argc, char *argv[])
             std::puts("fanmo " FANMO_VERSION);
             return 0;
         }
+    /* Anything of a megabyte or more is mapped on its own and handed back
+     * the moment it's freed. glibc otherwise raises that line, up to 32 MB,
+     * each time something big is freed, and a window-sized image redrawn at
+     * the compositor's request then stays the process's after it's gone. */
+    mallopt(M_MMAP_THRESHOLD, 1 << 20);
     QCoreApplication::setOrganizationName(QStringLiteral("fanMO"));
     QCoreApplication::setApplicationVersion(QStringLiteral(FANMO_VERSION));
     QCoreApplication::setApplicationName(QStringLiteral("fanMO"));
