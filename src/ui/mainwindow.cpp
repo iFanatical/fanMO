@@ -378,6 +378,7 @@ QWidget *MainWindow::buildDownloadPane()
             if (QMessageBox::question(this, QStringLiteral("fanMO"),
                                       QStringLiteral("Delete %1?").arg(QFileInfo(path).fileName())) == QMessageBox::Yes) {
                 QFile::remove(path);
+                QFile::remove(Nexus::metaPath(path));
                 refreshDownloads();
             }
         });
@@ -467,6 +468,13 @@ bool MainWindow::openInstance(const QString &path)
         return false;
     }
     m_hasInstance = true;
+    const QStringList resolved = Engine::resolveNexusIds(m_instance);
+    if (!resolved.isEmpty()) {
+        if (m_instance.save(&error))
+            log(QStringLiteral("Found the Nexus page of %1 mods installed on their own").arg(resolved.size()));
+        else
+            log(error);
+    }
     QSettings().setValue(QStringLiteral("instance"), path);
     setWindowTitle(QStringLiteral("fanMO — %1").arg(QDir(m_instance.gamePath()).dirName()));
     fillTools();
@@ -477,6 +485,17 @@ bool MainWindow::openInstance(const QString &path)
     refreshDownloads();
     loadEndorsements();
     refreshEndorsements(false);
+    /* An archive's name gives the id and version; Nexus has the rest. */
+    const QString key = Nexus::loadKey();
+    if (!resolved.isEmpty() && !key.isEmpty()) {
+        Instance *instance = &m_instance;
+        auto *job = new Job(QStringLiteral("Looking up"), [instance, resolved, key](const Engine::Callbacks &c, QString *err) {
+            return Engine::describeFromNexus(*instance, resolved, key, c, err);
+        }, this);
+        startJob(QStringLiteral("Looking up %1 mods on Nexus").arg(resolved.size()), job,
+                 [this](bool, const QString &) { showRows(); });
+        return true;
+    }
     nextLink();
     return true;
 }
@@ -766,7 +785,7 @@ void MainWindow::refreshDownloads()
         return;
     QList<QTreeWidgetItem *> items;
     for (const QFileInfo &fi : QDir(m_instance.downloadsPath()).entryInfoList(QDir::Files, QDir::Time)) {
-        if (fi.fileName().endsWith(QLatin1String(".part")))
+        if (fi.fileName().endsWith(QLatin1String(".part")) || fi.fileName().endsWith(QLatin1String(".meta.json")))
             continue;
         items << new QTreeWidgetItem({fi.fileName(), Util::humanSize(fi.size()),
                                       fi.lastModified().toString(QStringLiteral("yyyy-MM-dd hh:mm"))});
@@ -1120,8 +1139,7 @@ void MainWindow::installArchive(const QString &path)
         Instance *instance = &m_instance;
         auto folder = std::make_shared<QString>();
         auto notes = std::make_shared<QStringList>();
-        ModInfo meta;
-        meta.name = QFileInfo(path).completeBaseName();
+        const ModInfo meta = Engine::metaForArchive(path);
         auto *install = new Job(QStringLiteral("Installing"), [=](const Engine::Callbacks &, QString *err) {
             return Engine::installPrepared(*instance, *prepared, meta, preset, env, folder.get(), notes.get(), err);
         }, this);
@@ -1669,7 +1687,24 @@ void MainWindow::nextLink()
         const QString name = QUrl(links.first()).fileName();
         const QString dest = instance->downloadsPath() + QLatin1Char('/')
             + Util::safeFolderName(name.isEmpty() ? QStringLiteral("%1-%2").arg(link.modId).arg(link.fileId) : name);
-        return client.download(links.first(), dest, c.progress, c.cancel, error);
+        if (!client.download(links.first(), dest, c.progress, c.cancel, error))
+            return false;
+        /* What the link knows, and what Nexus says about it, for installing later. */
+        QString why;
+        Nexus::DownloadMeta meta;
+        if (const auto details = client.fileDetails(link.domain, link.modId, link.fileId, &why)) {
+            meta = *details;
+        } else {
+            meta.domain = link.domain;
+            meta.modId = link.modId;
+            meta.fileId = link.fileId;
+            if (c.log)
+                c.log(QStringLiteral("Nexus didn't describe mod %1 (%2); it keeps its id, not its name").arg(link.modId).arg(why));
+        }
+        QString metaError;
+        if (!Nexus::saveDownloadMeta(dest, meta, &metaError) && c.log)
+            c.log(metaError);
+        return true;
     }, this);
     startJob(QStringLiteral("Downloading file %1").arg(link.fileId), job, [this](bool, const QString &) {
         refreshDownloads();

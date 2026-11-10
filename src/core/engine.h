@@ -80,6 +80,21 @@ struct Prepared {
 bool prepareArchive(const Instance &instance, const QString &archive, Prepared *out, QString *error);
 void discard(const Prepared &prepared);
 
+/* What's known about an archive before it's installed: its Nexus mod, name
+ * and version, from the meta file a download leaves beside it or, failing
+ * that, from the way Nexus names its files. */
+ModInfo metaForArchive(const QString &archive);
+
+/* Mods installed on their own before fanMO kept that, with no Nexus id: gives
+ * them one the same way, along with a proper name and version where they
+ * still have the archive's. Returns the folders it changed. */
+QStringList resolveNexusIds(Instance &instance);
+
+/* Fills in what a mod's archive name couldn't say, author and category,
+ * from Nexus. Only empty fields change. */
+bool describeFromNexus(Instance &instance, const QStringList &folders, const QString &apiKey,
+                       const Callbacks &callbacks, QString *error);
+
 /* preset: nullopt uses the installer's defaults. */
 bool installPrepared(Instance &instance, const Prepared &prepared, const ModInfo &meta,
                      const std::optional<Fomod::Preset> &preset, const Fomod::Environment &env,

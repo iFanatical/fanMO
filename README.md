@@ -34,6 +34,12 @@ programs, a native LOOT among them, run directly.
   and a batch skips mods you've already decided not to endorse. Your votes are
   read from Nexus when the instance opens (Game, Refresh endorsements, does it
   again) and kept in `state/endorsements.json` between runs.
+- **Single downloads**: a "Mod manager download" from the website lands in
+  Downloads with a `.meta.json` beside it holding the mod's Nexus id, name,
+  version, author and category, so the installed mod opens on Nexus and can be
+  endorsed like a collection's. An archive without one gets its id and version
+  from Nexus's file naming (`Name-12345-1-2-1700000000.7z`); mods installed
+  that way before are matched up when the instance opens.
 - **Tools**: Windows programs run through Proton in the game's prefix; Linux
   programs (anything that isn't `.exe`, `.bat`, `.cmd`, `.com` or `.msi`) run
   as they are. New files in `Data` go to a mod you name, or to Overwrite. A

@@ -379,6 +379,117 @@ bool Client::download(const QString &urlText, const QString &dest, const Util::P
     return true;
 }
 
+/* --- downloads --------------------------------------------------------- */
+
+QString metaPath(const QString &archive)
+{
+    return archive + QStringLiteral(".meta.json");
+}
+
+std::optional<DownloadMeta> loadDownloadMeta(const QString &archive)
+{
+    QFile f(metaPath(archive));
+    if (!f.open(QIODevice::ReadOnly))
+        return std::nullopt;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    DownloadMeta m;
+    m.domain = o.value(QLatin1String("domain")).toString();
+    m.modId = o.value(QLatin1String("modId")).toInteger();
+    m.fileId = o.value(QLatin1String("fileId")).toInteger();
+    m.name = o.value(QLatin1String("name")).toString();
+    m.version = o.value(QLatin1String("version")).toString();
+    m.author = o.value(QLatin1String("author")).toString();
+    m.category = o.value(QLatin1String("category")).toString();
+    if (m.modId <= 0)
+        return std::nullopt;
+    return m;
+}
+
+bool saveDownloadMeta(const QString &archive, const DownloadMeta &m, QString *error)
+{
+    const QJsonObject o{{QStringLiteral("domain"), m.domain},
+                        {QStringLiteral("modId"), m.modId},
+                        {QStringLiteral("fileId"), m.fileId},
+                        {QStringLiteral("name"), m.name},
+                        {QStringLiteral("version"), m.version},
+                        {QStringLiteral("author"), m.author},
+                        {QStringLiteral("category"), m.category}};
+    return Util::writeFile(metaPath(archive), QJsonDocument(o).toJson(QJsonDocument::Indented), error);
+}
+
+std::optional<DownloadMeta> guessFromFileName(const QString &fileName)
+{
+    /* The extension goes by the last dot: a name like "Mod 1.2" has others. */
+    const qsizetype dot = fileName.lastIndexOf(QLatin1Char('.'));
+    const QString stem = dot > 0 ? fileName.left(dot) : fileName;
+    static const QRegularExpression re(QStringLiteral("^(.+?)-(\\d+)-([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)-(\\d{9,11})$"));
+    const auto m = re.match(stem);
+    if (!m.hasMatch())
+        return std::nullopt;
+    DownloadMeta out;
+    out.modId = m.captured(2).toLongLong();
+    if (out.modId <= 0)
+        return std::nullopt;
+    out.name = m.captured(1).trimmed();
+    out.version = m.captured(3).replace(QLatin1Char('-'), QLatin1Char('.'));
+    return out;
+}
+
+DownloadMeta parseFileDetails(const QByteArray &modJson, const QByteArray &fileJson, const QByteArray &gameJson)
+{
+    const QJsonObject mod = QJsonDocument::fromJson(modJson).object();
+    const QJsonObject file = QJsonDocument::fromJson(fileJson).object();
+    DownloadMeta m;
+    m.modId = mod.value(QLatin1String("mod_id")).toInteger();
+    m.fileId = file.value(QLatin1String("file_id")).toInteger();
+    m.author = mod.value(QLatin1String("author")).toString();
+    const QString modName = mod.value(QLatin1String("name")).toString().trimmed();
+    const QString fileName = file.value(QLatin1String("name")).toString().trimmed();
+    /* "Mod - Optional patch" tells two files of one mod apart; a main file
+     * named after its mod says nothing new. */
+    if (modName.isEmpty())
+        m.name = fileName;
+    else if (fileName.isEmpty() || modName.contains(fileName, Qt::CaseInsensitive))
+        m.name = modName;
+    else
+        m.name = modName + QStringLiteral(" - ") + fileName;
+    m.version = file.value(QLatin1String("version")).toString();
+    if (m.version.isEmpty())
+        m.version = mod.value(QLatin1String("version")).toString();
+    const qint64 category = mod.value(QLatin1String("category_id")).toInteger();
+    for (const auto &v : QJsonDocument::fromJson(gameJson).object().value(QLatin1String("categories")).toArray()) {
+        const QJsonObject c = v.toObject();
+        if (c.value(QLatin1String("category_id")).toInteger() == category) {
+            m.category = c.value(QLatin1String("name")).toString();
+            break;
+        }
+    }
+    return m;
+}
+
+std::optional<DownloadMeta> Client::fileDetails(const QString &domain, qint64 modId, qint64 fileId, QString *error)
+{
+    const QString base = QStringLiteral("%1/v1/games/%2").arg(QString::fromLatin1(apiBase), domain);
+    int status = 0;
+    const QByteArray mod = get(QUrl(QStringLiteral("%1/mods/%2.json").arg(base).arg(modId)), &status, error);
+    if (status != 200) {
+        if (error->isEmpty())
+            *error = QStringLiteral("Nexus answered %1 about mod %2").arg(status).arg(modId);
+        return std::nullopt;
+    }
+    /* The file and the categories only add detail: the mod's answer is enough. */
+    QString ignored;
+    const QByteArray file = get(QUrl(QStringLiteral("%1/mods/%2/files/%3.json").arg(base).arg(modId).arg(fileId)),
+                                &status, &ignored);
+    const QByteArray fileOk = status == 200 ? file : QByteArray();
+    const QByteArray game = get(QUrl(base + QStringLiteral(".json")), &status, &ignored);
+    DownloadMeta m = parseFileDetails(mod, fileOk, status == 200 ? game : QByteArray());
+    m.domain = domain;
+    m.modId = modId;
+    m.fileId = fileId;
+    return m;
+}
+
 /* --- endorsements ------------------------------------------------------ */
 
 static std::optional<Endorsement> endorsementNamed(const QString &status)

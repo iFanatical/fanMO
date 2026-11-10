@@ -516,6 +516,88 @@ void discard(const Prepared &prepared)
     QDir(prepared.workDir).removeRecursively();
 }
 
+static std::optional<Nexus::DownloadMeta> archiveMeta(const QString &archive)
+{
+    if (auto m = Nexus::loadDownloadMeta(archive))
+        return m;
+    return Nexus::guessFromFileName(QFileInfo(archive).fileName());
+}
+
+ModInfo metaForArchive(const QString &archive)
+{
+    ModInfo info;
+    if (const auto m = archiveMeta(archive)) {
+        info.nexusModId = m->modId;
+        info.nexusFileId = m->fileId;
+        info.name = m->name;
+        info.version = m->version;
+        info.author = m->author;
+        info.category = m->category;
+    }
+    if (info.name.isEmpty())
+        info.name = QFileInfo(archive).completeBaseName();
+    return info;
+}
+
+QStringList resolveNexusIds(Instance &instance)
+{
+    QStringList changed;
+    for (ModInfo &mod : instance.mods()) {
+        /* A collection's mods came with their ids; one without is off Nexus. */
+        if (mod.nexusModId > 0 || mod.archive.isEmpty() || !mod.collection.isEmpty())
+            continue;
+        const auto m = archiveMeta(instance.downloadsPath() + QLatin1Char('/') + mod.archive);
+        if (!m)
+            continue;
+        mod.nexusModId = m->modId;
+        if (mod.nexusFileId == 0)
+            mod.nexusFileId = m->fileId;
+        /* Only a name nobody chose: the archive's, as installing gave it. */
+        if (!m->name.isEmpty() && mod.name == QFileInfo(mod.archive).completeBaseName())
+            mod.name = m->name;
+        if (mod.version.isEmpty())
+            mod.version = m->version;
+        if (mod.author.isEmpty())
+            mod.author = m->author;
+        if (mod.category.isEmpty())
+            mod.category = m->category;
+        changed << mod.folder;
+    }
+    return changed;
+}
+
+bool describeFromNexus(Instance &instance, const QStringList &folders, const QString &apiKey,
+                       const Callbacks &callbacks, QString *error)
+{
+    Nexus::Client client(apiKey);
+    for (qsizetype i = 0; i < folders.size(); ++i) {
+        if (callbacks.cancel && *callbacks.cancel) {
+            *error = QStringLiteral("cancelled");
+            return false;
+        }
+        const auto it = instance.mods().find(folders[i]);
+        if (it == instance.mods().end() || it->nexusModId <= 0)
+            continue;
+        if (callbacks.progress)
+            callbacks.progress(i, folders.size(), it->name);
+        QString why;
+        const auto details = client.fileDetails(QStringLiteral("skyrimspecialedition"), it->nexusModId,
+                                                it->nexusFileId, &why);
+        if (!details) {
+            if (callbacks.log)
+                callbacks.log(QStringLiteral("%1: %2").arg(it->name, why));
+            continue;
+        }
+        if (it->author.isEmpty())
+            it->author = details->author;
+        if (it->category.isEmpty())
+            it->category = details->category;
+        if (it->version.isEmpty())
+            it->version = details->version;
+    }
+    return instance.save(error);
+}
+
 bool installPrepared(Instance &instance, const Prepared &prepared, const ModInfo &meta,
                      const std::optional<Fomod::Preset> &preset, const Fomod::Environment &env,
                      QString *folderOut, QStringList *warnings, QString *error)

@@ -1506,6 +1506,89 @@ static void testEndorsements()
     EQ(Nexus::endorseRefusal(QStringLiteral("SOMETHING_NEW")), QStringLiteral("SOMETHING_NEW"));
 }
 
+static void testDownloadMeta()
+{
+    /* Nexus's own file names, read back. */
+    auto g = Nexus::guessFromFileName(QStringLiteral("Maleficus' Clear Hand Hotkey-76540-1-1664887436.zip"));
+    CHECK(g.has_value());
+    if (g) {
+        EQ(g->modId, qint64(76540));
+        EQ(g->name, QStringLiteral("Maleficus' Clear Hand Hotkey"));
+        EQ(g->version, QStringLiteral("1"));
+    }
+    g = Nexus::guessFromFileName(QStringLiteral("(Part 2) Engine Fixes - skse64 Preloader ONLY-17230-7-1755965800.7z"));
+    CHECK(g && g->modId == 17230 && g->name == QStringLiteral("(Part 2) Engine Fixes - skse64 Preloader ONLY"));
+    g = Nexus::guessFromFileName(QStringLiteral("SkyUI 5.2-12604-5-2SE-1585331542.7z"));
+    CHECK(g && g->modId == 12604 && g->version == QStringLiteral("5.2SE") && g->name == QStringLiteral("SkyUI 5.2"));
+    CHECK(!Nexus::guessFromFileName(QStringLiteral("0ac3b555-384c-4184-8087-09c660493ead")));
+    CHECK(!Nexus::guessFromFileName(QStringLiteral("my-own-mod.zip")));
+
+    /* The v1 answers made into one, the name saying which file it is. */
+    const QByteArray mod = R"({"mod_id": 3863, "name": "SkyUI", "author": "schlangster", "version": "5.2SE", "category_id": 42})";
+    const QByteArray game = R"({"categories": [{"category_id": 42, "name": "User Interface"}, {"category_id": 1, "name": "Skyrim"}]})";
+    Nexus::DownloadMeta d = Nexus::parseFileDetails(mod, R"({"file_id": 9, "name": "SkyUI", "version": "5.2"})", game);
+    EQ(d.name, QStringLiteral("SkyUI"));
+    EQ(d.version, QStringLiteral("5.2"));
+    EQ(d.author, QStringLiteral("schlangster"));
+    EQ(d.category, QStringLiteral("User Interface"));
+    d = Nexus::parseFileDetails(mod, R"({"file_id": 10, "name": "Survival Mode patch"})", game);
+    EQ(d.name, QStringLiteral("SkyUI - Survival Mode patch"));
+    EQ(d.version, QStringLiteral("5.2SE"));   /* no file version: the mod's */
+    d = Nexus::parseFileDetails(mod, QByteArray(), QByteArray());
+    CHECK(d.name == QStringLiteral("SkyUI") && d.category.isEmpty());
+
+    /* A download's meta file beats its name. */
+    Sandbox s;
+    QString error;
+    const QString archive = s.inst.downloadsPath() + QStringLiteral("/SkyUI_5_2_SE-12604-5-2SE.7z");
+    put(archive, "7z");
+    ModInfo info = Engine::metaForArchive(archive);
+    EQ(info.nexusModId, qint64(0));                  /* not Nexus's pattern: nothing to guess */
+    EQ(info.name, QStringLiteral("SkyUI_5_2_SE-12604-5-2SE"));
+    Nexus::DownloadMeta saved;
+    saved.domain = QStringLiteral("skyrimspecialedition");
+    saved.modId = 12604;
+    saved.fileId = 35407;
+    saved.name = QStringLiteral("SkyUI");
+    saved.version = QStringLiteral("5.2SE");
+    saved.author = QStringLiteral("schlangster");
+    CHECK(Nexus::saveDownloadMeta(archive, saved, &error));
+    info = Engine::metaForArchive(archive);
+    EQ(info.nexusModId, qint64(12604));
+    EQ(info.nexusFileId, qint64(35407));
+    EQ(info.name, QStringLiteral("SkyUI"));
+    EQ(info.author, QStringLiteral("schlangster"));
+
+    /* Mods installed before fanMO kept this get it from their archives. */
+    const auto addInstalled = [&s](const QString &folder, const QString &name, const QString &archiveName,
+                                   const QString &collection = {}) {
+        ModInfo m;
+        m.folder = folder;
+        m.name = name;
+        m.archive = archiveName;
+        m.collection = collection;
+        s.inst.mods().insert(folder, m);
+    };
+    addInstalled(QStringLiteral("hotkey"), QStringLiteral("Maleficus' Clear Hand Hotkey-76540-1-1664887436"),
+                 QStringLiteral("Maleficus' Clear Hand Hotkey-76540-1-1664887436.zip"));
+    addInstalled(QStringLiteral("renamed"), QStringLiteral("My Bows"), QStringLiteral("Bows-55555-2-0-1700000000.7z"));
+    addInstalled(QStringLiteral("skyui"), QStringLiteral("SkyUI_5_2_SE-12604-5-2SE"), QStringLiteral("SkyUI_5_2_SE-12604-5-2SE.7z"));
+    addInstalled(QStringLiteral("curated"), QStringLiteral("Patch"), QStringLiteral("Patch-777-1-1700000000.7z"),
+                 QStringLiteral("Gate To Sovngarde"));
+    addInstalled(QStringLiteral("local"), QStringLiteral("local"), QStringLiteral("local.zip"));
+    EQ(Engine::resolveNexusIds(s.inst).size(), qsizetype(3));
+    const auto &mods = s.inst.mods();
+    EQ(mods[QStringLiteral("hotkey")].nexusModId, qint64(76540));
+    EQ(mods[QStringLiteral("hotkey")].name, QStringLiteral("Maleficus' Clear Hand Hotkey"));
+    EQ(mods[QStringLiteral("hotkey")].version, QStringLiteral("1"));
+    EQ(mods[QStringLiteral("renamed")].nexusModId, qint64(55555));
+    EQ(mods[QStringLiteral("renamed")].name, QStringLiteral("My Bows"));   /* a name you chose stays */
+    EQ(mods[QStringLiteral("skyui")].name, QStringLiteral("SkyUI"));        /* from its meta file */
+    EQ(mods[QStringLiteral("curated")].nexusModId, qint64(0));
+    EQ(mods[QStringLiteral("local")].nexusModId, qint64(0));
+    EQ(Engine::resolveNexusIds(s.inst).size(), qsizetype(0));   /* nothing left to do */
+}
+
 static void testNxm()
 {
     auto l = Nexus::parseNxm(QStringLiteral("nxm://skyrimspecialedition/mods/266/files/123?key=abc&expires=99&user_id=7"));
@@ -2027,7 +2110,7 @@ int main(int argc, char *argv[])
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"download meta", testDownloadMeta}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
         {"native tools", testNativeTools}, {"userlist sync native", testUserlistSyncNative},
     };
     for (const auto &t : tests) {

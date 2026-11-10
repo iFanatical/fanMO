@@ -42,6 +42,29 @@ NxmLink parseNxm(const QString &url);
  * as well, since that's what's in a browser's address bar. */
 NxmLink parseCollectionUrl(const QString &url);
 
+/* What a downloaded archive is: kept beside it as "<archive>.meta.json" so
+ * installing it later knows its Nexus mod, its name and its version. */
+struct DownloadMeta {
+    QString domain;
+    qint64 modId = 0;
+    qint64 fileId = 0;
+    QString name;       /* the mod's, with the file's when that says more */
+    QString version;
+    QString author;
+    QString category;
+};
+QString metaPath(const QString &archive);
+std::optional<DownloadMeta> loadDownloadMeta(const QString &archive);
+bool saveDownloadMeta(const QString &archive, const DownloadMeta &meta, QString *error);
+
+/* Nexus names its downloads "<name>-<mod id>-<version>-<upload time>.<ext>",
+ * the version's dots turned to dashes. Read back, that's a mod id, a name and
+ * a version for an archive that came without its meta file. */
+std::optional<DownloadMeta> guessFromFileName(const QString &fileName);
+
+/* The mod's, file's and game's answers from the v1 API made into one. */
+DownloadMeta parseFileDetails(const QByteArray &modJson, const QByteArray &fileJson, const QByteArray &gameJson);
+
 struct Account {
     QString name;
     bool premium = false;
@@ -91,6 +114,9 @@ public:
                               const QString &key, const QString &expires,
                               bool *premiumRequired, QString *error);
     QStringList collectionLinks(const QString &downloadLink, QString *error);
+
+    /* Name, author, version and category for one file of a mod. */
+    std::optional<DownloadMeta> fileDetails(const QString &domain, qint64 modId, qint64 fileId, QString *error);
 
     std::optional<QHash<qint64, Endorsement>> endorsements(const QString &domain, QString *error);
     /* Endorses, or abstains when endorse is false; the answer is where you
