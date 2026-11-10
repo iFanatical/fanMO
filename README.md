@@ -6,6 +6,8 @@ way Vortex does, and installs Nexus collections and Wabbajack lists without
 Wine. Windows tools still run, through the game's Proton prefix; Linux
 programs, a native LOOT among them, run directly.
 
+![fanMO with Gate to Sovngarde installed: 1,981 mods in priority order on the left, with endorsements and conflicts, and the plugin load order on the right](docs/screenshot.png)
+
 ## What it does
 
 - **Mods and plugins**: priority list on the left, load order on the right,
