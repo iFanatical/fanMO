@@ -50,6 +50,11 @@ programs, a native LOOT among them, run directly.
 Needs Qt 6 (Core, Gui, Widgets, Network, Concurrent), bzip2, zlib and xxhash,
 and 7-Zip at runtime.
 
+Releases are tagged source: take the latest from the
+[Releases page](https://github.com/iFanatical/fanMO/releases), or
+`git clone` and `git checkout v0.1.0`. What changed in each is in
+[CHANGELOG.md](CHANGELOG.md), and `fanmo --version` says which you have.
+
 ```sh
 make            # fanmo, fanmo-cli, and both test programs
 make test       # no game needed; everything runs in temporary folders

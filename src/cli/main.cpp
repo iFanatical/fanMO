@@ -12,6 +12,7 @@
 #include "core/plugins.h"
 #include "core/steam.h"
 #include "core/util.h"
+#include "core/version.h"
 #include "core/wabbajack.h"
 
 #include <QCoreApplication>
@@ -537,9 +538,15 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("fanMO"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(FANMO_VERSION));
     QStringList args = app.arguments().mid(1);
+    if (args == QStringList{QStringLiteral("--version")}) {
+        say(QStringLiteral("fanmo-cli " FANMO_VERSION));
+        return 0;
+    }
     if (args.isEmpty()) {
         say(QStringLiteral(
+            "fanmo-cli " FANMO_VERSION "\n"
             "usage: fanmo-cli COMMAND ...\n"
             "  find-game\n"
             "  create-instance --instance DIR --game DIR --compat DIR [--proton FILE]\n"

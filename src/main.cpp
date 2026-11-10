@@ -2,6 +2,7 @@
 #include "ui/dialogs.h"
 #include "ui/mainwindow.h"
 #include "ui/style.h"
+#include "core/version.h"
 
 #include <QApplication>
 #include <QDir>
@@ -11,6 +12,8 @@
 #include <QSettings>
 #include <QTimer>
 
+#include <cstdio>
+#include <cstring>
 #include <unistd.h>
 
 static QString socketName()
@@ -32,7 +35,14 @@ static bool sendToRunning(const QString &link)
 
 int main(int argc, char *argv[])
 {
+    /* Before the window system: it needs no display. */
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--version") == 0) {
+            std::puts("fanmo " FANMO_VERSION);
+            return 0;
+        }
     QCoreApplication::setOrganizationName(QStringLiteral("fanMO"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(FANMO_VERSION));
     QCoreApplication::setApplicationName(QStringLiteral("fanMO"));
     QGuiApplication::setDesktopFileName(QStringLiteral("fanmo"));
     Style::prepare();

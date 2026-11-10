@@ -1,4 +1,5 @@
 #include "nexus.h"
+#include "version.h"
 
 #include <QCoreApplication>
 #include <QEventLoop>
@@ -16,7 +17,7 @@
 namespace Nexus {
 
 static const char *const apiBase = "https://api.nexusmods.com";
-static const char *const appVersion = "0.1.0";
+static const char *const appVersion = FANMO_VERSION;
 
 QString keyFile()
 {
