@@ -191,3 +191,14 @@ with an existing Vortex install, which is how the installer was checked.
   FOMOD archives are never detected as root mods; they say where files go.
 - Hard links are real files: a tool that edits a deployed file in place edits
   the mod's copy. Vortex has this too. A tool that replaces the file is fine.
+
+## License
+
+Copyright (C) 2026 Aaron Bush
+
+fanMO is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
