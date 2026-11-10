@@ -8,6 +8,7 @@
 
 #include "util.h"
 
+#include <QHash>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QString>
@@ -46,6 +47,21 @@ struct Account {
     bool premium = false;
 };
 
+/* Where you stand on a mod. Undecided is what Nexus calls never having voted. */
+enum class Endorsement { Undecided, Endorsed, Abstained };
+
+/* Your endorsements in one game, by mod id, from /v1/user/endorsements.
+ * Undecided ones are left out. */
+QHash<qint64, Endorsement> parseEndorsements(const QByteArray &json, const QString &domain);
+
+/* Kept between runs, so the list shows them before Nexus has answered.
+ * load returns false when there's nothing saved yet: nothing is known. */
+bool loadEndorsements(const QString &path, QHash<qint64, Endorsement> *out);
+bool saveEndorsements(const QString &path, const QHash<qint64, Endorsement> &endorsements, QString *error);
+
+/* Nexus's reason for refusing a vote, such as NOT_DOWNLOADED_MOD, in words. */
+QString endorseRefusal(const QString &code);
+
 struct CollectionInfo {
     QString name;
     QString slug;
@@ -76,6 +92,12 @@ public:
                               bool *premiumRequired, QString *error);
     QStringList collectionLinks(const QString &downloadLink, QString *error);
 
+    std::optional<QHash<qint64, Endorsement>> endorsements(const QString &domain, QString *error);
+    /* Endorses, or abstains when endorse is false; the answer is where you
+     * stand now. Nexus wants the version you have. */
+    std::optional<Endorsement> endorse(const QString &domain, qint64 modId, const QString &version,
+                                       bool endorse, QString *error);
+
     /* Downloads to dest, resuming a partial dest.part. progress gets bytes. */
     bool download(const QString &url, const QString &dest, const Util::Progress &progress,
                   const std::atomic_bool *cancel, QString *error);
@@ -83,6 +105,7 @@ public:
 private:
     QNetworkRequest request(const QUrl &url) const;
     QByteArray get(const QUrl &url, int *status, QString *error);
+    QByteArray post(const QUrl &url, const QByteArray &json, int *status, QString *error);
     QJsonDocument graphql(const QByteArray &query, const QJsonObject &variables, QString *error);
 
     QString m_key;

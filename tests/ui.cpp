@@ -61,6 +61,45 @@ static std::vector<ModListModel::Row> rowsOf(const QStringList &list)
     return rows;
 }
 
+static void testEndorsementColumn()
+{
+    ModListModel m;
+    auto rows = rowsOf({QStringLiteral("liked"), QStringLiteral("liked part 2"), QStringLiteral("skipped"),
+                        QStringLiteral("unvoted"), QStringLiteral("local")});
+    rows[0].nexusModId = rows[1].nexusModId = 10;
+    rows[2].nexusModId = 20;
+    rows[3].nexusModId = 30;
+    m.setRows(rows);
+    const auto shown = [&m](int row) { return m.index(row, ModListModel::Endorsed).data().toString(); };
+
+    /* Until your votes are read, nothing claims you haven't voted. */
+    EQ(shown(3), QString());
+    m.setEndorsements({{10, Nexus::Endorsement::Endorsed}, {20, Nexus::Endorsement::Abstained}}, true);
+    EQ(shown(0), QStringLiteral("\u2665"));
+    EQ(shown(1), QStringLiteral("\u2665"));   /* one vote covers every file of a mod */
+    EQ(shown(2), QStringLiteral("\u2013"));
+    EQ(shown(3), QStringLiteral("\u2661"));
+    EQ(shown(4), QString());              /* not from Nexus */
+
+    /* A reorder or reload keeps them. */
+    m.setRows(rowsOf({QStringLiteral("unvoted")}));
+    m.setRows(rows);
+    EQ(shown(0), QStringLiteral("\u2665"));
+
+    /* Endorsing everything selected: one call per mod, nothing already
+     * endorsed, and a batch leaves "won't endorse" alone. */
+    const auto ids = [](const QList<ModListModel::Vote> &votes) {
+        QList<qint64> out;
+        for (const auto &v : votes)
+            out << v.modId;
+        return out;
+    };
+    EQ(ids(m.votes({0, 1, 2, 3, 4}, true)), (QList<qint64>{30}));
+    EQ(ids(m.votes({2}, true)), (QList<qint64>{20}));   /* picked alone, it changes your mind */
+    EQ(ids(m.votes({0, 1, 2, 3}, false)), (QList<qint64>{10, 30}));
+    EQ(m.votes({4}, true).size(), qsizetype(0));
+}
+
 static void testReorder()
 {
     const QStringList abcd = {QStringLiteral("a"), QStringLiteral("b"), QStringLiteral("c"), QStringLiteral("d")};
@@ -600,7 +639,7 @@ int main(int argc, char *argv[])
     Style::apply(app);
 
     const struct { const char *name; void (*fn)(); } tests[] = {
-        {"reorder", testReorder}, {"plugin index", testPluginIndex},
+        {"reorder", testReorder}, {"endorsement column", testEndorsementColumn}, {"plugin index", testPluginIndex},
         {"move after masters", testMoveAfterMasters}, {"fomod wizard", testWizard}, {"main window", testWindow}, {"tool run", testToolRun},
     };
     for (const auto &t : tests) {

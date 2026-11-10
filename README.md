@@ -27,6 +27,13 @@ programs, a native LOOT among them, run directly.
   DLLs Windows loads from there, and says so in the log.
 - **Profiles**: separate mod lists and load orders, optionally separate saves
   and INIs.
+- **Endorsements**: the ♥ column shows where you stand on each Nexus mod:
+  a filled heart for endorsed, an outline for not yet, a dash for won't
+  endorse. Right-click to Endorse or Won't endorse, one mod or a whole
+  selection: one vote per Nexus mod however many of its files are installed,
+  and a batch skips mods you've already decided not to endorse. Your votes are
+  read from Nexus when the instance opens (Game, Refresh endorsements, does it
+  again) and kept in `state/endorsements.json` between runs.
 - **Tools**: Windows programs run through Proton in the game's prefix; Linux
   programs (anything that isn't `.exe`, `.bat`, `.cmd`, `.com` or `.msi`) run
   as they are. New files in `Data` go to a mod you name, or to Overwrite. A

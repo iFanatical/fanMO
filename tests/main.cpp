@@ -1473,6 +1473,39 @@ static void testModIniTweaks()
     CHECK(slurp(s.inst.myGamesPath() + QStringLiteral("/Skyrim.ini")).contains("fArrowSpeedMult=3.0\r\n"));
 }
 
+static void testEndorsements()
+{
+    /* What /v1/user/endorsements answers: every game, every status. */
+    const QByteArray json = R"([
+        {"mod_id": 266, "domain_name": "skyrimspecialedition", "status": "Endorsed", "version": "1.0"},
+        {"mod_id": 3863, "domain_name": "skyrimspecialedition", "status": "Abstained", "version": "5.2"},
+        {"mod_id": 12604, "domain_name": "skyrimspecialedition", "status": "Undecided", "version": "1"},
+        {"mod_id": 266, "domain_name": "fallout4", "status": "Abstained", "version": "2"}
+    ])";
+    const auto votes = Nexus::parseEndorsements(json, QStringLiteral("skyrimspecialedition"));
+    EQ(votes.size(), qsizetype(2));
+    CHECK(votes.value(266) == Nexus::Endorsement::Endorsed);
+    CHECK(votes.value(3863) == Nexus::Endorsement::Abstained);
+    CHECK(!votes.contains(12604));
+    CHECK(Nexus::parseEndorsements("{\"message\":\"nope\"}", QStringLiteral("skyrimspecialedition")).isEmpty());
+
+    /* Nothing saved is "not known yet", not "endorsed nothing". */
+    QTemporaryDir tmp;
+    const QString path = tmp.path() + QStringLiteral("/state/endorsements.json");
+    QHash<qint64, Nexus::Endorsement> loaded;
+    CHECK(!Nexus::loadEndorsements(path, &loaded));
+    QString error;
+    CHECK(Nexus::saveEndorsements(path, votes, &error));
+    CHECK(Nexus::loadEndorsements(path, &loaded));
+    CHECK(loaded == votes);
+    CHECK(Nexus::saveEndorsements(path, {}, &error));
+    CHECK(Nexus::loadEndorsements(path, &loaded));
+    CHECK(loaded.isEmpty());
+
+    CHECK(Nexus::endorseRefusal(QStringLiteral("NOT_DOWNLOADED_MOD")).contains(QLatin1String("downloaded")));
+    EQ(Nexus::endorseRefusal(QStringLiteral("SOMETHING_NEW")), QStringLiteral("SOMETHING_NEW"));
+}
+
 static void testNxm()
 {
     auto l = Nexus::parseNxm(QStringLiteral("nxm://skyrimspecialedition/mods/266/files/123?key=abc&expires=99&user_id=7"));
@@ -1994,7 +2027,7 @@ int main(int argc, char *argv[])
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
         {"native tools", testNativeTools}, {"userlist sync native", testUserlistSyncNative},
     };
     for (const auto &t : tests) {

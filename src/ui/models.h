@@ -6,9 +6,11 @@
 
 #include "core/deploy.h"
 #include "core/instance.h"
+#include "core/nexus.h"
 #include "core/plugins.h"
 
 #include <QAbstractTableModel>
+#include <QStyledItemDelegate>
 #include <QStringList>
 
 #include <vector>
@@ -43,7 +45,7 @@ protected:
 class ModListModel : public OrderedModel {
     Q_OBJECT
 public:
-    enum Column { Enabled, Priority, Name, Conflicts, Version, Category, Source, ColumnCount };
+    enum Column { Enabled, Priority, Name, Endorsed, Conflicts, Version, Category, Source, ColumnCount };
 
     struct Row {
         QString folder;
@@ -51,6 +53,7 @@ public:
         QString version;
         QString category;
         QString source;
+        qint64 nexusModId = 0;
         bool enabled = true;
         int total = 0, winning = 0, losing = 0;
         QStringList overrides, overriddenBy;
@@ -62,6 +65,22 @@ public:
     void setConflicts(const Deploy::FileIndex &files);
     const std::vector<Row> &rows() const { return m_rows; }
     void setEnabled(const QList<int> &rows, bool enabled);
+    /* Your endorsements by Nexus mod id; known is false until they've been
+     * read once, and until then the column stays blank. They outlive setRows. */
+    void setEndorsements(QHash<qint64, Nexus::Endorsement> endorsements, bool known);
+    bool endorsementsKnown() const { return m_endorsementsKnown; }
+    const QHash<qint64, Nexus::Endorsement> &endorsements() const { return m_endorsements; }
+    Nexus::Endorsement endorsement(qint64 nexusModId) const;
+
+    struct Vote {
+        qint64 modId;
+        QString version;
+        QString name;   /* the first selected row's, for the log */
+    };
+    /* One vote per Nexus mod, however many of its files are installed: those
+     * of the given rows whose answer would change. Endorsing a batch passes
+     * over mods you chose not to endorse; one on its own changes your mind. */
+    QList<Vote> votes(const QList<int> &rows, bool endorse) const;
 
     int rowCount(const QModelIndex &parent = {}) const override;
     int columnCount(const QModelIndex &parent = {}) const override;
@@ -78,6 +97,16 @@ protected:
 
 private:
     std::vector<Row> m_rows;
+    QHash<qint64, Nexus::Endorsement> m_endorsements;
+    bool m_endorsementsKnown = false;
+};
+
+/* Paints the Endorsed column's hearts itself: a font's heart can come out as
+ * an outline either way, and then only colour would tell them apart. */
+class EndorsementDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override;
 };
 
 class PluginListModel : public OrderedModel {

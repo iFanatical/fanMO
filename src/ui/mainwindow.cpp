@@ -178,6 +178,7 @@ void MainWindow::buildUi()
     moreMenu->addAction(QStringLiteral("Open instance folder"), this, [this] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(m_instance.root()));
     });
+    moreMenu->addAction(QStringLiteral("Refresh endorsements"), this, [this] { refreshEndorsements(true); });
     moreMenu->addSeparator();
     moreMenu->addAction(QStringLiteral("Purge deployment…"), this, &MainWindow::purge);
     moreButton->setMenu(moreMenu);
@@ -242,6 +243,14 @@ void MainWindow::resizeEvent(QResizeEvent *event)
     fitToolbars();
 }
 
+/* Every mod fanMO opens on Nexus is Skyrim SE's. */
+static const QLatin1String nexusDomain("skyrimspecialedition");
+
+struct FetchedEndorsements {
+    std::optional<QHash<qint64, Nexus::Endorsement>> votes;
+    QString error;
+};
+
 static QLineEdit *filterEdit(const QString &placeholder)
 {
     auto *edit = new QLineEdit;
@@ -269,6 +278,9 @@ QWidget *MainWindow::buildModPane()
     header->setSectionResizeMode(ModListModel::Priority, QHeaderView::Fixed);
     header->resizeSection(ModListModel::Priority, 52);
     header->setSectionResizeMode(ModListModel::Name, QHeaderView::Stretch);
+    header->setSectionResizeMode(ModListModel::Endorsed, QHeaderView::Fixed);
+    header->resizeSection(ModListModel::Endorsed, 30);
+    m_modView->setItemDelegateForColumn(ModListModel::Endorsed, new EndorsementDelegate(m_modView));
     header->resizeSection(ModListModel::Conflicts, 92);
     header->resizeSection(ModListModel::Version, 72);
     header->resizeSection(ModListModel::Category, 104);
@@ -463,6 +475,8 @@ bool MainWindow::openInstance(const QString &path)
     /* Nothing deployed yet is not the same as nothing to deploy. */
     setDirty(!QFileInfo::exists(m_instance.statePath() + QStringLiteral("/deployment.json")));
     refreshDownloads();
+    loadEndorsements();
+    refreshEndorsements(false);
     nextLink();
     return true;
 }
@@ -516,6 +530,7 @@ void MainWindow::showRows()
         r.name = it->name;
         r.version = it->version;
         r.category = it->category;
+        r.nexusModId = it->nexusModId;
         r.source = it->collection.isEmpty() ? (it->nexusModId ? QStringLiteral("Nexus") : QString()) : it->collection;
         r.enabled = enabled;
         rows.push_back(std::move(r));
@@ -1342,6 +1357,24 @@ void MainWindow::modMenu(const QPoint &pos)
             QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.nexusmods.com/skyrimspecialedition/mods/%1").arg(id)));
         });
     }
+    const auto toEndorse = m_mods->votes(rows, true);
+    const auto toAbstain = m_mods->votes(rows, false);
+    if (std::any_of(rows.begin(), rows.end(), [this](int r) { return m_mods->rows()[size_t(r)].nexusModId > 0; })) {
+        const bool haveKey = !Nexus::loadKey().isEmpty();
+        const auto label = [](const QString &verb, qsizetype n) {
+            return n > 1 ? QStringLiteral("%1 %2 mods").arg(verb).arg(n) : verb;
+        };
+        QAction *endorse = menu.addAction(label(QStringLiteral("Endorse"), toEndorse.size()), this,
+                                          [this, rows] { endorseMods(rows, true); });
+        endorse->setEnabled(haveKey && !busy() && !toEndorse.isEmpty());
+        QAction *abstain = menu.addAction(label(QStringLiteral("Won't endorse"), toAbstain.size()), this,
+                                          [this, rows] { endorseMods(rows, false); });
+        abstain->setEnabled(haveKey && !busy() && !toAbstain.isEmpty());
+        if (!haveKey) {
+            endorse->setToolTip(QStringLiteral("Set a Nexus API key in Settings first"));
+            abstain->setToolTip(endorse->toolTip());
+        }
+    }
     menu.addAction(QStringLiteral("Show conflicts"), this, [this] { m_tabs->setCurrentIndex(1); });
     if (rows.size() == 1 && info != m_instance.mods().constEnd()) {
         const QString key = row.folder;
@@ -1362,7 +1395,120 @@ void MainWindow::modMenu(const QPoint &pos)
     menu.addSeparator();
     menu.addAction(rows.size() == 1 ? QStringLiteral("Remove mod…") : QStringLiteral("Remove %1 mods…").arg(rows.size()),
                    this, [this, rows] { removeMods(rows); });
+    menu.setToolTipsVisible(true);
     menu.exec(m_modView->viewport()->mapToGlobal(pos));
+}
+
+QString MainWindow::endorsementsPath() const
+{
+    return m_instance.statePath() + QStringLiteral("/endorsements.json");
+}
+
+void MainWindow::loadEndorsements()
+{
+    QHash<qint64, Nexus::Endorsement> saved;
+    const bool known = Nexus::loadEndorsements(endorsementsPath(), &saved);
+    m_mods->setEndorsements(std::move(saved), known);
+}
+
+void MainWindow::refreshEndorsements(bool announce)
+{
+    if (!m_hasInstance || m_fetchingEndorsements)
+        return;
+    const QString key = Nexus::loadKey();
+    if (key.isEmpty()) {
+        if (announce)
+            log(QStringLiteral("Set a Nexus API key in Settings to see your endorsements"));
+        return;
+    }
+    m_fetchingEndorsements = true;
+    const QString path = endorsementsPath();
+    auto *watcher = new QFutureWatcher<FetchedEndorsements>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, announce, path] {
+        m_fetchingEndorsements = false;
+        const FetchedEndorsements fetched = watcher->result();
+        watcher->deleteLater();
+        if (!fetched.votes) {
+            log(QStringLiteral("Couldn't read your endorsements from Nexus: %1").arg(fetched.error));
+            return;
+        }
+        m_mods->setEndorsements(*fetched.votes, true);
+        QString error;
+        if (!Nexus::saveEndorsements(path, *fetched.votes, &error))
+            log(error);
+        if (announce) {
+            const auto endorsed = std::count(fetched.votes->cbegin(), fetched.votes->cend(), Nexus::Endorsement::Endorsed);
+            log(QStringLiteral("Nexus says you've endorsed %1 Skyrim SE mods").arg(endorsed));
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([key] {
+        FetchedEndorsements fetched;
+        Nexus::Client client(key);
+        fetched.votes = client.endorsements(QString(nexusDomain), &fetched.error);
+        return fetched;
+    }));
+}
+
+void MainWindow::endorseMods(const QList<int> &rows, bool endorse)
+{
+    if (busy() || !m_hasInstance)
+        return;
+    const QList<ModListModel::Vote> votes = m_mods->votes(rows, endorse);
+    if (votes.isEmpty())
+        return;
+    const QString key = Nexus::loadKey();
+    if (key.isEmpty()) {
+        log(QStringLiteral("Set a Nexus API key in Settings to endorse mods"));
+        return;
+    }
+    auto results = std::make_shared<QHash<qint64, Nexus::Endorsement>>();
+    const QString title = endorse ? QStringLiteral("Endorsing") : QStringLiteral("Marking won't endorse");
+    auto *job = new Job(title, [votes, key, endorse, results](const Engine::Callbacks &c, QString *error) {
+        Nexus::Client client(key);
+        int refused = 0;
+        for (qsizetype i = 0; i < votes.size(); ++i) {
+            if (c.cancel && *c.cancel) {
+                *error = QStringLiteral("cancelled");
+                return false;
+            }
+            const ModListModel::Vote &v = votes[i];
+            if (c.progress)
+                c.progress(i, votes.size(), v.name);
+            QString why;
+            const auto now = client.endorse(QString(nexusDomain), v.modId, v.version, endorse, &why);
+            if (now) {
+                results->insert(v.modId, *now);
+                continue;
+            }
+            /* Out of quota, every call after this one fails the same way. */
+            if (why.startsWith(QLatin1String("Nexus rate limit"))) {
+                *error = why;
+                return false;
+            }
+            ++refused;
+            if (c.log)
+                c.log(QStringLiteral("%1: %2").arg(v.name, why));
+        }
+        if (refused && c.log)
+            c.log(QStringLiteral("Nexus refused %1 of %2").arg(refused).arg(votes.size()));
+        return true;
+    }, this);
+    startJob(title, job, [this, results, endorse](bool, const QString &) {
+        /* Whatever went through counts, even if the run stopped part way. */
+        auto all = m_mods->endorsements();
+        for (auto it = results->cbegin(); it != results->cend(); ++it)
+            all.insert(it.key(), it.value());
+        const bool known = m_mods->endorsementsKnown();
+        m_mods->setEndorsements(all, known);
+        QString error;
+        if (known && !Nexus::saveEndorsements(endorsementsPath(), all, &error))
+            log(error);
+        log(endorse ? QStringLiteral("Endorsed %1 mods").arg(results->size())
+                    : QStringLiteral("Marked %1 mods won't endorse").arg(results->size()));
+        /* Never read the rest: fetch them so the column can show. */
+        if (!known)
+            refreshEndorsements(false);
+    });
 }
 
 void MainWindow::pluginMenu(const QPoint &pos)

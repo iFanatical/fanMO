@@ -2,10 +2,13 @@
 
 #include "theme.h"
 
+#include <QApplication>
 #include <QBrush>
 #include <QDataStream>
 #include <QIODevice>
 #include <QMimeData>
+#include <QPainter>
+#include <QPainterPath>
 #include <QSet>
 
 #include <algorithm>
@@ -129,6 +132,42 @@ void ModListModel::setEnabled(const QList<int> &rows, bool enabled)
     emit enabledChanged();
 }
 
+void ModListModel::setEndorsements(QHash<qint64, Nexus::Endorsement> endorsements, bool known)
+{
+    m_endorsements = std::move(endorsements);
+    m_endorsementsKnown = known;
+    if (!m_rows.empty())
+        emit dataChanged(index(0, Endorsed), index(rowCount() - 1, Endorsed));
+}
+
+Nexus::Endorsement ModListModel::endorsement(qint64 nexusModId) const
+{
+    return m_endorsements.value(nexusModId, Nexus::Endorsement::Undecided);
+}
+
+QList<ModListModel::Vote> ModListModel::votes(const QList<int> &rows, bool endorse) const
+{
+    QList<Vote> out;
+    QSet<qint64> seen;
+    for (int r : rows) {
+        if (r < 0 || r >= int(m_rows.size()))
+            continue;
+        const Row &row = m_rows[size_t(r)];
+        if (row.nexusModId <= 0 || seen.contains(row.nexusModId))
+            continue;
+        seen.insert(row.nexusModId);
+        out << Vote{row.nexusModId, row.version, row.name};
+    }
+    const bool batch = out.size() > 1;
+    out.removeIf([&](const Vote &v) {
+        const Nexus::Endorsement now = endorsement(v.modId);
+        if (endorse)
+            return now == Nexus::Endorsement::Endorsed || (batch && now == Nexus::Endorsement::Abstained);
+        return now == Nexus::Endorsement::Abstained;
+    });
+    return out;
+}
+
 int ModListModel::rowCount(const QModelIndex &parent) const
 {
     return parent.isValid() ? 0 : int(m_rows.size());
@@ -144,6 +183,9 @@ QVariant ModListModel::data(const QModelIndex &index, int role) const
     if (!index.isValid())
         return {};
     const Row &r = m_rows[size_t(index.row())];
+    /* Blank for a mod not from Nexus, and until your votes have been read. */
+    const bool votable = r.nexusModId > 0 && m_endorsementsKnown;
+    const Nexus::Endorsement vote = endorsement(r.nexusModId);
     switch (role) {
     case Qt::CheckStateRole:
         return index.column() == Enabled ? QVariant(r.enabled ? Qt::Checked : Qt::Unchecked) : QVariant();
@@ -154,6 +196,12 @@ QVariant ModListModel::data(const QModelIndex &index, int role) const
         case Version: return r.version;
         case Category: return r.category;
         case Source: return r.source;
+        case Endorsed:
+            if (!votable)
+                return QString();
+            return vote == Nexus::Endorsement::Endorsed ? QStringLiteral("\u2665")      /* ♥ */
+                 : vote == Nexus::Endorsement::Abstained ? QStringLiteral("\u2013")     /* – */
+                                                          : QStringLiteral("\u2661");    /* ♡ */
         case Conflicts:
             if (!r.enabled || (r.winning == 0 && r.losing == 0))
                 return QString();
@@ -165,6 +213,8 @@ QVariant ModListModel::data(const QModelIndex &index, int role) const
         }
         return {};
     case Qt::ForegroundRole:
+        if (index.column() == Endorsed)
+            return QBrush(vote == Nexus::Endorsement::Endorsed ? Theme::red : Theme::textMuted);
         if (!r.enabled)
             return QBrush(Theme::Gtk::textDisabled);
         if (index.column() == Conflicts) {
@@ -178,6 +228,10 @@ QVariant ModListModel::data(const QModelIndex &index, int role) const
         }
         return {};
     case Qt::ToolTipRole:
+        if (index.column() == Endorsed && votable)
+            return vote == Nexus::Endorsement::Endorsed ? QStringLiteral("Endorsed")
+                 : vote == Nexus::Endorsement::Abstained ? QStringLiteral("You chose not to endorse it")
+                                                          : QStringLiteral("Not endorsed");
         if (index.column() == Conflicts && (r.winning || r.losing)) {
             QStringList lines;
             lines << QStringLiteral("%1 files, wins %2, loses %3").arg(r.total).arg(r.winning).arg(r.losing);
@@ -191,6 +245,8 @@ QVariant ModListModel::data(const QModelIndex &index, int role) const
     case Qt::TextAlignmentRole:
         if (index.column() == Priority)
             return int(Qt::AlignRight | Qt::AlignVCenter);
+        if (index.column() == Endorsed)
+            return int(Qt::AlignCenter);
         return {};
     }
     return {};
@@ -198,12 +254,19 @@ QVariant ModListModel::data(const QModelIndex &index, int role) const
 
 QVariant ModListModel::headerData(int section, Qt::Orientation orientation, int role) const
 {
-    if (orientation != Qt::Horizontal || role != Qt::DisplayRole)
+    if (orientation != Qt::Horizontal)
+        return {};
+    if (role == Qt::ToolTipRole && section == Endorsed)
+        return QStringLiteral("Endorsed on Nexus");
+    if (role == Qt::TextAlignmentRole && section == Endorsed)
+        return int(Qt::AlignCenter);
+    if (role != Qt::DisplayRole)
         return {};
     switch (section) {
     case Enabled: return QString();
     case Priority: return QStringLiteral("#");
     case Name: return QStringLiteral("Mod");
+    case Endorsed: return QStringLiteral("\u2665");
     case Conflicts: return QStringLiteral("Conflicts");
     case Version: return QStringLiteral("Version");
     case Category: return QStringLiteral("Category");
@@ -235,6 +298,47 @@ bool ModListModel::setData(const QModelIndex &index, const QVariant &value, int 
 void ModListModel::applyMove(const QList<int> &rows, int before)
 {
     moveItems(m_rows, rows, before);
+}
+
+static QPainterPath heartPath(const QRectF &r)
+{
+    const qreal x = r.left(), y = r.top(), w = r.width(), h = r.height();
+    QPainterPath p;
+    p.moveTo(x + w / 2, y + h);
+    p.cubicTo(x - w * 0.1, y + h * 0.55, x + w * 0.05, y - h * 0.05, x + w / 2, y + h * 0.28);
+    p.cubicTo(x + w * 0.95, y - h * 0.05, x + w * 1.1, y + h * 0.55, x + w / 2, y + h);
+    return p;
+}
+
+void EndorsementDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const
+{
+    /* Background and selection as any cell, then the mark on top. */
+    QStyleOptionViewItem plain = option;
+    initStyleOption(&plain, index);
+    const QString mark = plain.text;
+    plain.text.clear();
+    QStyle *style = plain.widget ? plain.widget->style() : QApplication::style();
+    style->drawControl(QStyle::CE_ItemViewItem, &plain, painter, plain.widget);
+    if (mark.isEmpty())
+        return;
+
+    const qreal size = qMin<qreal>(11, option.rect.height() - 6);
+    const QRectF box(option.rect.center().x() - size / 2 + 0.5, option.rect.center().y() - size / 2 + 1, size, size * 0.9);
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing);
+    if (mark == QStringLiteral("\u2665")) {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(Theme::red);
+        painter->drawPath(heartPath(box));
+    } else if (mark == QStringLiteral("\u2661")) {
+        painter->setPen(QPen(Theme::textMuted, 1.2));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawPath(heartPath(box));
+    } else {
+        painter->setPen(QPen(Theme::textMuted, 1.5, Qt::SolidLine, Qt::RoundCap));
+        painter->drawLine(QPointF(box.left() + 1, box.center().y()), QPointF(box.right() - 1, box.center().y()));
+    }
+    painter->restore();
 }
 
 /* --- plugins ---------------------------------------------------------- */

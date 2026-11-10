@@ -102,6 +102,10 @@ private:
     void createModFromOverwrite();
     void captureUnmanaged();
     void nextLink();
+    QString endorsementsPath() const;
+    void loadEndorsements();
+    void refreshEndorsements(bool announce);
+    void endorseMods(const QList<int> &rows, bool endorse);
     QList<int> selectedRows(QTreeView *view) const;
 
     Instance m_instance;
@@ -142,6 +146,7 @@ private:
     QPushButton *m_cancelButton;
 
     QFutureWatcher<Scan> m_scanWatcher;
+    bool m_fetchingEndorsements = false;
     bool m_rescanPending = false;
     QTimer *m_rescanTimer;
     QStringList m_unmanaged;

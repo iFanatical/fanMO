@@ -126,9 +126,22 @@ static void waitFor(QNetworkReply *reply, int timeoutMs)
 
 QByteArray Client::get(const QUrl &url, int *status, QString *error)
 {
+    return post(url, QByteArray(), status, error);
+}
+
+/* An empty body makes it a GET. */
+QByteArray Client::post(const QUrl &url, const QByteArray &json, int *status, QString *error)
+{
     /* A 429 means slow down, not stop: the quota refills as it runs. */
     for (int attempt = 0; attempt < 5; ++attempt) {
-        QNetworkReply *reply = m_network.get(request(url));
+        QNetworkReply *reply;
+        if (json.isEmpty()) {
+            reply = m_network.get(request(url));
+        } else {
+            QNetworkRequest r = request(url);
+            r.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("application/json"));
+            reply = m_network.post(r, json);
+        }
         waitFor(reply, 30000);
         recordLimits(reply);
         *status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -364,6 +377,114 @@ bool Client::download(const QString &urlText, const QString &dest, const Util::P
         return false;
     }
     return true;
+}
+
+/* --- endorsements ------------------------------------------------------ */
+
+static std::optional<Endorsement> endorsementNamed(const QString &status)
+{
+    if (status.compare(QLatin1String("Endorsed"), Qt::CaseInsensitive) == 0)
+        return Endorsement::Endorsed;
+    if (status.compare(QLatin1String("Abstained"), Qt::CaseInsensitive) == 0)
+        return Endorsement::Abstained;
+    if (status.compare(QLatin1String("Undecided"), Qt::CaseInsensitive) == 0)
+        return Endorsement::Undecided;
+    return std::nullopt;
+}
+
+static QString endorsementName(Endorsement e)
+{
+    return e == Endorsement::Endorsed ? QStringLiteral("Endorsed")
+         : e == Endorsement::Abstained ? QStringLiteral("Abstained") : QStringLiteral("Undecided");
+}
+
+QHash<qint64, Endorsement> parseEndorsements(const QByteArray &json, const QString &domain)
+{
+    QHash<qint64, Endorsement> out;
+    for (const auto &v : QJsonDocument::fromJson(json).array()) {
+        const QJsonObject o = v.toObject();
+        if (o.value(QLatin1String("domain_name")).toString().compare(domain, Qt::CaseInsensitive) != 0)
+            continue;
+        const qint64 id = o.value(QLatin1String("mod_id")).toInteger();
+        const auto e = endorsementNamed(o.value(QLatin1String("status")).toString());
+        if (id > 0 && e && *e != Endorsement::Undecided)
+            out.insert(id, *e);
+    }
+    return out;
+}
+
+bool loadEndorsements(const QString &path, QHash<qint64, Endorsement> *out)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    const QJsonObject mods = QJsonDocument::fromJson(f.readAll()).object().value(QLatin1String("mods")).toObject();
+    out->clear();
+    for (auto it = mods.constBegin(); it != mods.constEnd(); ++it) {
+        const auto e = endorsementNamed(it.value().toString());
+        if (e && *e != Endorsement::Undecided)
+            out->insert(it.key().toLongLong(), *e);
+    }
+    return true;
+}
+
+bool saveEndorsements(const QString &path, const QHash<qint64, Endorsement> &endorsements, QString *error)
+{
+    QJsonObject mods;
+    for (auto it = endorsements.constBegin(); it != endorsements.constEnd(); ++it)
+        if (it.value() != Endorsement::Undecided)
+            mods.insert(QString::number(it.key()), endorsementName(it.value()));
+    const QJsonObject root{{QStringLiteral("mods"), mods}};
+    return Util::writeFile(path, QJsonDocument(root).toJson(QJsonDocument::Compact), error);
+}
+
+QString endorseRefusal(const QString &code)
+{
+    if (code == QLatin1String("NOT_DOWNLOADED_MOD"))
+        return QStringLiteral("Nexus only takes votes from accounts that downloaded the mod");
+    if (code == QLatin1String("TOO_SOON_AFTER_DOWNLOAD"))
+        return QStringLiteral("too soon after downloading it; Nexus asks you to try the mod first, so try again later");
+    if (code == QLatin1String("IS_OWN_MOD"))
+        return QStringLiteral("it's your own mod");
+    return code;
+}
+
+std::optional<QHash<qint64, Endorsement>> Client::endorsements(const QString &domain, QString *error)
+{
+    int status = 0;
+    const QByteArray body = get(QUrl(QString::fromLatin1(apiBase) + QStringLiteral("/v1/user/endorsements.json")),
+                                &status, error);
+    if (status != 200) {
+        if (error->isEmpty())
+            *error = status == 401 ? QStringLiteral("Nexus rejected this API key")
+                                   : QStringLiteral("Nexus answered %1").arg(status);
+        return std::nullopt;
+    }
+    return parseEndorsements(body, domain);
+}
+
+std::optional<Endorsement> Client::endorse(const QString &domain, qint64 modId, const QString &version,
+                                           bool endorse, QString *error)
+{
+    const QUrl url(QStringLiteral("%1/v1/games/%2/mods/%3/%4.json")
+                       .arg(QString::fromLatin1(apiBase), domain).arg(modId)
+                       .arg(endorse ? QStringLiteral("endorse") : QStringLiteral("abstain")));
+    const QByteArray payload = QJsonDocument(QJsonObject{{QStringLiteral("Version"), version}})
+                                   .toJson(QJsonDocument::Compact);
+    int status = 0;
+    const QByteArray body = post(url, payload, &status, error);
+    const QJsonObject o = QJsonDocument::fromJson(body).object();
+    if (status != 200) {
+        const QString message = o.value(QLatin1String("message")).toString();
+        if (!message.isEmpty())
+            *error = endorseRefusal(message);
+        else if (error->isEmpty())
+            *error = QStringLiteral("Nexus answered %1").arg(status);
+        return std::nullopt;
+    }
+    /* The answer says where you stand; trust it over what was asked for. */
+    const auto e = endorsementNamed(o.value(QLatin1String("status")).toString());
+    return e ? *e : (endorse ? Endorsement::Endorsed : Endorsement::Abstained);
 }
 
 } /* namespace Nexus */
