@@ -7,6 +7,7 @@
 #include "core/engine.h"
 #include "core/installer.h"
 #include "core/instance.h"
+#include "core/launcher.h"
 #include "core/nexus.h"
 #include "core/patch.h"
 #include "core/plugins.h"
@@ -19,11 +20,15 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QLocalSocket>
 #include <QMutex>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSaveFile>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QThreadPool>
 #include <QtConcurrent>
@@ -572,6 +577,228 @@ static int wabbajackInstall(QStringList args)
     return ok ? 0 : 2;
 }
 
+/* fanMO's window listens here for nxm:// links; anyone answering means it's
+ * open. */
+static bool windowOpen()
+{
+    QLocalSocket socket;
+    socket.connectToServer(QStringLiteral("fanmo-%1").arg(getuid()));
+    return socket.waitForConnected(300);
+}
+
+static QString dataHome()
+{
+    const QString xdg = qEnvironmentVariable("XDG_DATA_HOME");
+    return xdg.isEmpty() ? QDir::homePath() + QStringLiteral("/.local/share") : xdg;
+}
+static QString launcherFile() { return dataHome() + QStringLiteral("/applications/fanmo-skyrim.desktop"); }
+static QString launcherIcon() { return dataHome() + QStringLiteral("/icons/hicolor/256x256/apps/fanmo-skyrim.png"); }
+
+/* Started from a launcher there's no terminal to read: say it on the desktop
+ * as well, if there's anything to say it with. */
+static bool notifyDesktop = false;
+static void tell(const QString &summary, const QString &body)
+{
+    say(body);
+    if (!notifyDesktop || QStandardPaths::findExecutable(QStringLiteral("notify-send")).isEmpty())
+        return;
+    QStringList args{QStringLiteral("--app-name=fanMO"), summary, body};
+    if (QFileInfo::exists(launcherIcon()))
+        args.prepend(QStringLiteral("--icon=") + launcherIcon());
+    QProcess::startDetached(QStringLiteral("notify-send"), args);
+}
+
+/* Deploys, runs a tool the way the window's Run does, and waits for it: the
+ * game without fanMO's window open, from a launcher or a shortcut. */
+static int runCommand(QStringList args)
+{
+    QString path = option(args, QStringLiteral("--instance"));
+    if (path.isEmpty())
+        path = QSettings(QStringLiteral("fanMO"), QStringLiteral("fanMO")).value(QStringLiteral("instance")).toString();
+    QString profileName = option(args, QStringLiteral("--profile"));
+    const bool deploy = args.removeAll(QStringLiteral("--no-deploy")) == 0;
+    notifyDesktop = args.removeAll(QStringLiteral("--notify")) > 0;
+    const QString notRun = QStringLiteral("fanMO didn't start the game");
+    for (const QString &arg : std::as_const(args))
+        if (arg.startsWith(QLatin1String("--"))) {
+            say(QStringLiteral("unknown option: ") + arg);
+            return 1;
+        }
+    if (args.size() > 1) {
+        say(QStringLiteral("one tool at a time; for a name with spaces, put it in quotes"));
+        return 1;
+    }
+    const QString toolName = args.value(0);
+    if (windowOpen()) {
+        tell(notRun, QStringLiteral("fanMO is open: use Run there, or close it first, so the two don't change the "
+                                    "instance at once"));
+        return 1;
+    }
+    Instance instance;
+    QString error;
+    if (path.isEmpty()) {
+        tell(notRun, QStringLiteral("need --instance DIR: fanMO hasn't opened one yet"));
+        return 1;
+    }
+    if (!instance.load(path, &error)) {
+        tell(notRun, QStringLiteral("can't open the instance at %1: %2").arg(path, error));
+        return 1;
+    }
+    /* A name is checked now, before deploying; the game is looked for after,
+     * since SKSE is in the game folder only once it's deployed. */
+    std::optional<Tool> tool;
+    if (!toolName.isEmpty() && !(tool = Launcher::findTool(instance, toolName))) {
+        QStringList names;
+        for (const Tool &t : instance.tools())
+            names << t.name;
+        tell(notRun, QStringLiteral("no tool called %1; there's %2")
+                         .arg(toolName, names.isEmpty() ? QStringLiteral("none") : names.join(QStringLiteral(", "))));
+        return 1;
+    }
+    if (profileName.isEmpty())
+        profileName = instance.activeProfile();
+
+    /* What the game sees has to be what the lists say. Only changes are
+     * touched, so a deployed profile takes a moment. */
+    if (deploy) {
+        Deploy::Report report;
+        Engine::Callbacks quiet = consoleCallbacks();
+        quiet.progress = {};
+        if (!Engine::activateProfile(instance, profileName, quiet, &report, &error)) {
+            tell(notRun, QStringLiteral("deploy failed, so nothing was run: %1").arg(error));
+            return 1;
+        }
+        say(report.linked + report.removed > 0
+                ? QStringLiteral("deployed %1: %2 linked, %3 removed").arg(profileName).arg(report.linked).arg(report.removed)
+                : QStringLiteral("%1 is deployed").arg(profileName));
+        for (const QString &warning : std::as_const(report.warnings))
+            say(QStringLiteral("warning: %1").arg(warning));
+    } else if (profileName != instance.activeProfile()) {
+        say(QStringLiteral("%1 isn't the deployed profile: leave out --no-deploy to switch to it").arg(profileName));
+        return 1;
+    }
+    Profile profile;
+    if (!instance.loadProfile(instance.activeProfile(), &profile, &error)) {
+        say(error);
+        return 1;
+    }
+    if (!tool && !(tool = Launcher::findTool(instance, {}))) {
+        tell(notRun, QStringLiteral("no SKSE or Skyrim to run in %1").arg(instance.gamePath()));
+        return 1;
+    }
+
+    QProcess process;
+    if (!Launcher::prepare(instance, *tool, &process, &error)) {
+        tell(notRun, QStringLiteral("can't run %1: %2").arg(tool->name, error));
+        return 1;
+    }
+    const QString logFile = Launcher::logFile(instance, *tool);
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.setStandardOutputFile(logFile);
+    const QByteArray before = tool->syncPlugins ? Engine::orderSnapshot(instance) : QByteArray();
+    say(QStringLiteral("running %1; its output goes to %2").arg(tool->name, logFile));
+    QElapsedTimer timer;
+    timer.start();
+    process.start();
+    if (!process.waitForStarted(-1)) {
+        tell(notRun, Launcher::isWindowsProgram(tool->exe)
+                         ? QStringLiteral("%1 didn't start: Proton couldn't be run").arg(tool->name)
+                         : QStringLiteral("%1 didn't start: %2").arg(tool->name, process.errorString()));
+        return 1;
+    }
+    process.waitForFinished(-1);
+    const bool crashed = process.exitStatus() == QProcess::CrashExit;
+    const int code = process.exitCode();
+    const bool failed = crashed || code != 0;
+    const qint64 seconds = timer.elapsed() / 1000;
+    const QString took = seconds < 60 ? QStringLiteral("%1 s").arg(seconds)
+                                      : QStringLiteral("%1 min %2 s").arg(seconds / 60).arg(seconds % 60);
+    if (failed) {
+        const QStringList hints = Launcher::failureHints(logFile);
+        for (const QString &line : hints)
+            say(QStringLiteral("  ") + line);
+        tell(crashed ? QStringLiteral("%1 crashed").arg(tool->name) : QStringLiteral("%1 failed").arg(tool->name),
+             (crashed ? QStringLiteral("%1 crashed after %2").arg(tool->name, took)
+                      : QStringLiteral("%1 exited with code %2 after %3").arg(tool->name).arg(code).arg(took))
+                 + QStringLiteral(". Its output is in %1").arg(logFile));
+    } else {
+        say(QStringLiteral("%1 finished after %2").arg(tool->name, took));
+    }
+    /* Captured files left the game folder; the next run's deploy puts them
+     * back as part of their mod. */
+    if (Engine::finishTool(instance, *tool, &profile, failed, before, consoleCallbacks()))
+        say(QStringLiteral("they go back into the game on the next run or deploy"));
+    return failed ? (crashed ? 1 : code) : 0;
+}
+
+/* A desktop launcher for the game: fanmo-cli run, with the game's own icon,
+ * read out of SkyrimSE.exe on this machine (it isn't fanMO's to ship). */
+static int addLauncher(QStringList args)
+{
+    QString path = option(args, QStringLiteral("--instance"));
+    if (path.isEmpty())
+        path = QSettings(QStringLiteral("fanMO"), QStringLiteral("fanMO")).value(QStringLiteral("instance")).toString();
+    Instance instance;
+    QString error;
+    if (path.isEmpty() || !instance.load(path, &error)) {
+        say(QStringLiteral("need --instance DIR: %1").arg(path.isEmpty() ? QStringLiteral("fanMO hasn't opened one yet")
+                                                                          : error));
+        return 1;
+    }
+    path = QFileInfo(path).absoluteFilePath();
+
+    QString icon = QStringLiteral("applications-games");
+    QImage image = QImage::fromData(Launcher::exeIcon(instance.gamePath() + QStringLiteral("/SkyrimSE.exe")), "ICO");
+    if (image.isNull()) {
+        say(QStringLiteral("SkyrimSE.exe has no icon fanMO can read; using a generic one"));
+    } else {
+        if (image.width() != 256)
+            image = image.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        QDir().mkpath(QFileInfo(launcherIcon()).absolutePath());
+        if (image.save(launcherIcon(), "PNG"))
+            icon = launcherIcon();
+        else
+            say(QStringLiteral("couldn't write %1; using a generic icon").arg(launcherIcon()));
+    }
+
+    const QString exec = Launcher::desktopExec({QCoreApplication::applicationFilePath(), QStringLiteral("run"),
+                                                QStringLiteral("--instance"), path, QStringLiteral("--notify")});
+    const QString game = QDir(instance.gamePath()).dirName();
+    const QString text = QStringLiteral(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=%1 (fanMO)\n"
+        "GenericName=Game\n"
+        "Comment=Deploy fanMO's active profile and play\n"
+        "Exec=%2\n"
+        "Icon=%3\n"
+        "Terminal=false\n"
+        "Categories=Game;\n").arg(game, exec, icon);
+    QDir().mkpath(QFileInfo(launcherFile()).absolutePath());
+    QSaveFile out(launcherFile());
+    if (!out.open(QIODevice::WriteOnly) || out.write(text.toUtf8()) < 0 || !out.commit()) {
+        say(QStringLiteral("couldn't write %1: %2").arg(launcherFile(), out.errorString()));
+        return 1;
+    }
+    say(QStringLiteral("added %1 (fanMO) to your applications: %2").arg(game, launcherFile()));
+    return 0;
+}
+
+static int removeLauncher()
+{
+    bool any = false;
+    for (const QString &file : {launcherFile(), launcherIcon()})
+        if (QFile::exists(file)) {
+            any = true;
+            if (!QFile::remove(file)) {
+                say(QStringLiteral("couldn't remove %1").arg(file));
+                return 1;
+            }
+        }
+    say(any ? QStringLiteral("removed the game launcher") : QStringLiteral("there's no game launcher to remove"));
+    return 0;
+}
+
 static int hashCommand(const QStringList &args)
 {
     for (const QString &file : args)
@@ -612,6 +839,13 @@ int main(int argc, char *argv[])
             "  status --instance DIR [--profile NAME]\n"
             "  deploy --instance DIR [--profile NAME]\n"
             "  purge --instance DIR\n"
+            "  run [TOOL] [--instance DIR] [--profile NAME] [--no-deploy] [--notify]\n"
+            "      deploys, then runs TOOL (SKSE when left out) and waits for it; the instance\n"
+            "      is the one fanMO last opened unless --instance says otherwise; --notify\n"
+            "      says on the desktop when it can't, for a launcher with no terminal\n"
+            "  add-launcher [--instance DIR]\n"
+            "      adds the game to your applications, running fanmo-cli run, with its icon\n"
+            "  remove-launcher\n"
             "  import-order --instance DIR --file LOADORDER.TXT [--profile NAME]\n"
             "  wabbajack-info --list FILE\n"
             "  wabbajack-install --instance DIR --list FILE [--profile NAME] [--archives DIR,DIR] [--verify] [--allow-missing]\n"
@@ -641,6 +875,12 @@ int main(int argc, char *argv[])
         return wabbajackInfo(args);
     if (command == QLatin1String("wabbajack-install"))
         return wabbajackInstall(args);
+    if (command == QLatin1String("run"))
+        return runCommand(args);
+    if (command == QLatin1String("add-launcher"))
+        return addLauncher(args);
+    if (command == QLatin1String("remove-launcher"))
+        return removeLauncher();
     if (command == QLatin1String("register-nxm"))
         return registerNxm();
     if (command == QLatin1String("hash"))

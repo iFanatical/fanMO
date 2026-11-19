@@ -430,7 +430,11 @@ bool Client::download(const QString &urlText, const QString &dest, const Util::P
         return false;
     }
     if (failure != QNetworkReply::NoError) {
-        *error = message;
+        /* Nothing arrived: don't leave an empty .part behind. */
+        if (QFileInfo(partial).size() == 0)
+            QFile::remove(partial);
+        const QString host = QUrl(urlText).host();
+        *error = host.isEmpty() ? message : QStringLiteral("%1: %2").arg(host, message);
         return false;
     }
     QFile::remove(dest);
@@ -515,6 +519,7 @@ DownloadMeta parseFileDetails(const QByteArray &modJson, const QByteArray &fileJ
         m.name = modName;
     else
         m.name = modName + QStringLiteral(" - ") + fileName;
+    m.archive = file.value(QLatin1String("file_name")).toString().trimmed();
     m.version = file.value(QLatin1String("version")).toString();
     if (m.version.isEmpty())
         m.version = mod.value(QLatin1String("version")).toString();

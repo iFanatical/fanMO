@@ -27,8 +27,12 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalServer>
 #include <QProcess>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QtEndian>
 
 #include <bzlib.h>
 #include <cstdio>
@@ -1527,13 +1531,17 @@ static void testDownloadMeta()
     /* The v1 answers made into one, the name saying which file it is. */
     const QByteArray mod = R"({"mod_id": 3863, "name": "SkyUI", "author": "schlangster", "version": "5.2SE", "category_id": 42})";
     const QByteArray game = R"({"categories": [{"category_id": 42, "name": "User Interface"}, {"category_id": 1, "name": "Skyrim"}]})";
-    Nexus::DownloadMeta d = Nexus::parseFileDetails(mod, R"({"file_id": 9, "name": "SkyUI", "version": "5.2"})", game);
+    Nexus::DownloadMeta d = Nexus::parseFileDetails(
+        mod, R"({"file_id": 9, "name": "SkyUI", "version": "5.2", "file_name": "SkyUI_5_2_SE-12604-5-2SE.7z"})", game);
     EQ(d.name, QStringLiteral("SkyUI"));
+    /* Download links end in an id, so the archive's name comes from here. */
+    EQ(d.archive, QStringLiteral("SkyUI_5_2_SE-12604-5-2SE.7z"));
     EQ(d.version, QStringLiteral("5.2"));
     EQ(d.author, QStringLiteral("schlangster"));
     EQ(d.category, QStringLiteral("User Interface"));
     d = Nexus::parseFileDetails(mod, R"({"file_id": 10, "name": "Survival Mode patch"})", game);
     EQ(d.name, QStringLiteral("SkyUI - Survival Mode patch"));
+    CHECK(d.archive.isEmpty());
     EQ(d.version, QStringLiteral("5.2SE"));   /* no file version: the mod's */
     d = Nexus::parseFileDetails(mod, QByteArray(), QByteArray());
     CHECK(d.name == QStringLiteral("SkyUI") && d.category.isEmpty());
@@ -2163,6 +2171,244 @@ static void testHashes()
        (QStringList{QStringLiteral("-a"), QStringLiteral("b c"), QStringLiteral("d")}));
 }
 
+/* A mirror that's down says which one it is, and leaves nothing behind. */
+static void testDownload()
+{
+    QTemporaryDir tmp;
+    const QString dest = tmp.path() + QStringLiteral("/SkyUI.7z");
+    Nexus::Client client(QStringLiteral("not-sent-to-mirrors"));
+
+    /* A port nothing listens on: refused straight away. */
+    QTcpServer probe;
+    CHECK(probe.listen(QHostAddress::LocalHost));
+    const quint16 closed = probe.serverPort();
+    probe.close();
+    QString error;
+    CHECK(!client.download(QStringLiteral("http://127.0.0.1:%1/672de05f").arg(closed), dest, {}, nullptr, &error));
+    CHECK(error.startsWith(QStringLiteral("127.0.0.1: ")));
+    CHECK(!QFileInfo::exists(dest + QStringLiteral(".part")));
+    CHECK(!QFileInfo::exists(dest));
+
+    /* One that answers, and never sees the API key. */
+    QTcpServer server;
+    CHECK(server.listen(QHostAddress::LocalHost));
+    QByteArray request;
+    QObject::connect(&server, &QTcpServer::newConnection, [&] {
+        QTcpSocket *socket = server.nextPendingConnection();
+        QObject::connect(socket, &QTcpSocket::readyRead, socket, [&request, socket] {
+            request += socket->readAll();
+            if (request.contains("\r\n\r\n")) {
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+                socket->disconnectFromHost();
+            }
+        });
+    });
+    error.clear();
+    CHECK(client.download(QStringLiteral("http://127.0.0.1:%1/672de05f").arg(server.serverPort()), dest, {}, nullptr, &error));
+    EQ(error, QString());
+    QFile f(dest);
+    CHECK(f.open(QIODevice::ReadOnly));
+    EQ(f.readAll(), QByteArray("hello"));
+    CHECK(!request.contains("not-sent-to-mirrors"));
+}
+
+/* fanmo-cli run: the game, deployed first, with nothing of fanMO's open. */
+static void testCliRun()
+{
+    Sandbox s;
+    QString error;
+
+    /* Left out, the tool is the game: SKSE once it's in the game folder, else
+     * Skyrim, an added tool winning over a bare one. A new instance has an
+     * SKSE tool whether or not SKSE is installed. */
+    EQ(int(s.inst.tools().size()), 1);
+    auto found = Launcher::findTool(s.inst, {});
+    CHECK(found && found->exe == QStringLiteral("SkyrimSE.exe") && found->name == QStringLiteral("Skyrim"));
+    put(s.game + QStringLiteral("/skse64_loader.exe"), "exe");
+    s.inst.tools()[0].outputMod = QStringLiteral("generated");
+    found = Launcher::findTool(s.inst, {});
+    CHECK(found && found->name == QStringLiteral("SKSE") && found->outputMod == QStringLiteral("generated"));
+    CHECK(Launcher::findTool(s.inst, QStringLiteral("skse")));
+    CHECK(!Launcher::findTool(s.inst, QStringLiteral("SSEEdit")));
+
+    /* A stand-in for the game: it needs the mod deployed, and leaves a file
+     * behind in Data. */
+    s.addMod(QStringLiteral("low"), {{QStringLiteral("low.txt"), "low"}});
+    const QString exe = s.dir.path() + QStringLiteral("/tools/game.sh");
+    put(exe, QStringLiteral("#!/bin/sh\n[ -f '%1/Data/low.txt' ] || exit 3\necho made > '%1/Data/made.txt'\n")
+                 .arg(s.game).toUtf8());
+    QFile::setPermissions(exe, QFile::permissions(exe) | QFileDevice::ExeOwner);
+    Tool game;
+    game.name = QStringLiteral("Game");
+    game.exe = exe;
+    game.outputMod = QStringLiteral("Output");
+    s.inst.tools().push_back(game);
+    const QString fail = s.dir.path() + QStringLiteral("/tools/fail.sh");
+    put(fail, "#!/bin/sh\necho 'err: a missing DLL'\nexit 7\n");
+    QFile::setPermissions(fail, QFile::permissions(fail) | QFileDevice::ExeOwner);
+    Tool failing;
+    failing.name = QStringLiteral("Failing");
+    failing.exe = fail;
+    s.inst.tools().push_back(failing);
+    CHECK(s.inst.save(&error));
+    CHECK(s.inst.saveProfile(s.profile, &error));
+
+    /* Its own socket folder, so an open fanMO of the user's isn't seen. */
+    const QString sockets = s.dir.path() + QStringLiteral("/sockets");
+    QDir().mkpath(sockets);
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("TMPDIR"), sockets);
+    env.insert(QStringLiteral("XDG_CONFIG_HOME"), s.dir.path() + QStringLiteral("/config"));
+    QString output;
+    const auto cli = [&](const QStringList &args) {
+        QProcess p;
+        p.setProcessEnvironment(env);
+        p.setProcessChannelMode(QProcess::MergedChannels);
+        p.start(QCoreApplication::applicationDirPath() + QStringLiteral("/fanmo-cli"), args);
+        p.waitForFinished(60000);
+        output = QString::fromUtf8(p.readAll());
+        return p.exitStatus() == QProcess::NormalExit ? p.exitCode() : -1;
+    };
+    const QStringList run{QStringLiteral("run"), QStringLiteral("Game"), QStringLiteral("--instance"), s.root};
+
+    /* fanMO's window open: hands off, nothing deployed. */
+    {
+        const QByteArray tmp = qgetenv("TMPDIR");
+        qputenv("TMPDIR", QFile::encodeName(sockets));
+        QLocalServer window;
+        CHECK(window.listen(QStringLiteral("fanmo-%1").arg(getuid())));
+        qputenv("TMPDIR", tmp);
+        EQ(cli(run), 1);
+        CHECK(output.contains(QLatin1String("fanMO is open")));
+        CHECK(!QFileInfo::exists(s.game + QStringLiteral("/Data/low.txt")));
+    }
+
+    EQ(cli({QStringLiteral("run"), QStringLiteral("SSEEdit"), QStringLiteral("--instance"), s.root}), 1);
+    CHECK(output.contains(QLatin1String("no tool called SSEEdit")));
+
+    /* Deployed, run, and what it left captured into its mod. */
+    EQ(cli(run), 0);
+    if (!output.contains(QLatin1String("Game finished")))
+        std::printf("    output was: %s\n", qPrintable(output));
+    CHECK(QFileInfo::exists(s.game + QStringLiteral("/Data/low.txt")));
+    CHECK(!QFileInfo::exists(s.game + QStringLiteral("/Data/made.txt")));
+    CHECK(QFileInfo::exists(s.inst.modsPath() + QStringLiteral("/Output/made.txt")));
+    CHECK(output.contains(QLatin1String("captured 1 new files into Output")));
+    Instance after;
+    CHECK(after.load(s.root, &error));
+    CHECK(after.mods().contains(QStringLiteral("Output")));
+
+    /* A failure keeps its exit code and says why. */
+    EQ(cli({QStringLiteral("run"), QStringLiteral("failing"), QStringLiteral("--instance"), s.root,
+            QStringLiteral("--no-deploy")}), 7);
+    CHECK(output.contains(QLatin1String("exited with code 7")));
+    CHECK(output.contains(QLatin1String("err: a missing DLL")));
+
+    /* The launcher runs exactly that, telling the desktop when it can't. This
+     * SkyrimSE.exe is a stand-in with no icon, so the icon is a generic one. */
+    const QString data = s.dir.path() + QStringLiteral("/data");
+    env.insert(QStringLiteral("XDG_DATA_HOME"), data);
+    EQ(cli({QStringLiteral("add-launcher"), QStringLiteral("--instance"), s.root}), 0);
+    QFile desktop(data + QStringLiteral("/applications/fanmo-skyrim.desktop"));
+    CHECK(desktop.open(QIODevice::ReadOnly));
+    const QString entry = QString::fromUtf8(desktop.readAll());
+    desktop.close();
+    CHECK(entry.contains(QStringLiteral("/fanmo-cli run --instance %1 --notify\n").arg(s.root)));
+    CHECK(entry.contains(QLatin1String("\nName=game (fanMO)\n")));
+    CHECK(entry.contains(QLatin1String("\nIcon=applications-games\n")));
+    CHECK(output.contains(QLatin1String("no icon")));
+    EQ(cli({QStringLiteral("remove-launcher")}), 0);
+    CHECK(!desktop.exists());
+}
+
+/* The game launcher: the icon out of a Windows program, and its Exec line. */
+static void testLauncherFile()
+{
+    /* A program of two icons, 16 and 256 pixels, laid out by hand. */
+    QByteArray pe(0x400, '\0');
+    const auto u16 = [&](int at, quint16 v) { qToLittleEndian(v, pe.data() + at); };
+    const auto u32 = [&](int at, quint32 v) { qToLittleEndian(v, pe.data() + at); };
+    pe[0] = 'M'; pe[1] = 'Z';
+    u32(0x3c, 0x40);
+    u32(0x40, 0x00004550);
+    u16(0x46, 1);           /* one section */
+    u16(0x54, 240);         /* optional header size, PE32+ */
+    const int opt = 0x58;
+    u16(opt, 0x20b);
+    u32(opt + 108, 16);     /* data directories */
+    u32(opt + 112 + 16, 0x1000);
+    u32(opt + 112 + 20, 0x200);
+    const int sec = opt + 240;
+    memcpy(pe.data() + sec, ".rsrc", 5);
+    u32(sec + 8, 0x200); u32(sec + 12, 0x1000); u32(sec + 16, 0x200); u32(sec + 20, 0x200);
+    const int r = 0x200;    /* the resource tree, offsets from here */
+    const auto dir = [&](int at, std::initializer_list<std::pair<quint32, quint32>> entries) {
+        u16(r + at + 14, quint16(entries.size()));
+        int i = 0;
+        for (const auto &[id, target] : entries) {
+            u32(r + at + 16 + 8 * i, id);
+            u32(r + at + 20 + 8 * i, target);
+            ++i;
+        }
+    };
+    const quint32 sub = 0x80000000u;
+    dir(0x000, {{3, sub | 0x20}, {14, sub | 0x40}});
+    dir(0x020, {{1, sub | 0x60}, {2, sub | 0x80}});
+    dir(0x040, {{1, sub | 0xa0}});
+    dir(0x060, {{1033, 0xc0}});
+    dir(0x080, {{1033, 0xd0}});
+    dir(0x0a0, {{1033, 0xe0}});
+    const QByteArray small("small icon"), big("\x89PNG big icon");
+    const auto data = [&](int at, int where, int size) { u32(r + at, quint32(0x1000 + where)); u32(r + at + 4, quint32(size)); };
+    data(0xc0, 0x100, int(small.size()));
+    data(0xd0, 0x120, int(big.size()));
+    memcpy(pe.data() + r + 0x100, small.data(), small.size());
+    memcpy(pe.data() + r + 0x120, big.data(), big.size());
+    /* The group: 16x16 as icon 1, 256x256 (written as 0) as icon 2. */
+    const int g = r + 0x140;
+    u16(g + 2, 1); u16(g + 4, 2);
+    pe[g + 6] = 16; pe[g + 7] = 16; u16(g + 6 + 4, 1); u16(g + 6 + 6, 32); u32(g + 6 + 8, quint32(small.size())); u16(g + 6 + 12, 1);
+    u16(g + 20 + 4, 1); u16(g + 20 + 6, 32); u32(g + 20 + 8, quint32(big.size())); u16(g + 20 + 12, 2);
+    data(0xe0, 0x140, 34);
+
+    QTemporaryDir tmp;
+    const QString exe = tmp.path() + QStringLiteral("/Game.exe");
+    put(exe, pe);
+    const QByteArray ico = Launcher::exeIcon(exe);
+    CHECK(ico.size() == 22 + big.size());
+    if (ico.size() == 22 + big.size()) {
+        EQ(qFromLittleEndian<quint16>(ico.data() + 4), quint16(1));
+        EQ(int(quint8(ico[6])), 0);   /* 256 */
+        EQ(qFromLittleEndian<quint32>(ico.data() + 14), quint32(big.size()));
+        EQ(qFromLittleEndian<quint32>(ico.data() + 18), quint32(22));
+        EQ(ico.mid(22), big);
+    }
+    /* Anything else is no icon, not a crash: cut short, pointing outside
+     * itself, or not a program. */
+    for (const int cut : {0x50, 0x150, 0x210, 0x2e0, 0x340}) {
+        put(exe, pe.left(cut));
+        CHECK(Launcher::exeIcon(exe).isEmpty());
+    }
+    QByteArray wild = pe;
+    qToLittleEndian<quint32>(0x7ffffff0u, wild.data() + r + 0xd0);
+    put(exe, wild);
+    CHECK(Launcher::exeIcon(exe).isEmpty());
+    put(exe, "#!/bin/sh\n");
+    CHECK(Launcher::exeIcon(exe).isEmpty());
+    CHECK(Launcher::exeIcon(tmp.path() + QStringLiteral("/missing.exe")).isEmpty());
+
+    /* Quoted where the spec says, escaped inside quotes, and then the string
+     * rules on top: four backslashes for one, %% for a percent sign. */
+    EQ(Launcher::desktopExec({QStringLiteral("/usr/bin/fanmo-cli"), QStringLiteral("run"), QStringLiteral("--notify")}),
+       QStringLiteral("/usr/bin/fanmo-cli run --notify"));
+    EQ(Launcher::desktopExec({QStringLiteral("fanmo-cli"), QStringLiteral("--instance"), QStringLiteral("/my mods/fanMO")}),
+       QStringLiteral("fanmo-cli --instance \"/my mods/fanMO\""));
+    EQ(Launcher::desktopExec({QStringLiteral("a\"b$c`d")}), QStringLiteral("\"a\\\\\"b\\\\$c\\\\`d\""));
+    EQ(Launcher::desktopExec({QStringLiteral("back\\slash")}), QStringLiteral("\"back\\\\\\\\slash\""));
+    EQ(Launcher::desktopExec({QStringLiteral("100%")}), QStringLiteral("100%%"));
+    EQ(Launcher::desktopExec({QString()}), QStringLiteral("\"\""));
+}
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
@@ -2179,8 +2425,8 @@ int main(int argc, char *argv[])
         {"deploy crash recovery", testDeployCrashRecovery}, {"conflicts", testConflicts},
         {"plugins", testPlugins}, {"load order", testLoadOrder}, {"ini merge", testIniMerge},
         {"mo2 import", testMo2Import}, {"yaml", testYaml}, {"userlist merge", testUserlistMerge},
-        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"download meta", testDownloadMeta}, {"key store", testKeyStore}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
-        {"native tools", testNativeTools}, {"userlist sync native", testUserlistSyncNative},
+        {"userlist sync", testUserlistSync}, {"single root install", testSingleRootInstall}, {"collection flow", testCollectionFlow}, {"profiles", testProfiles}, {"mod ini tweaks", testModIniTweaks}, {"endorsements", testEndorsements}, {"download meta", testDownloadMeta}, {"download", testDownload}, {"key store", testKeyStore}, {"nxm", testNxm}, {"launch environment", testLaunchEnvironment},
+        {"native tools", testNativeTools}, {"cli run", testCliRun}, {"launcher file", testLauncherFile}, {"userlist sync native", testUserlistSyncNative},
     };
     for (const auto &t : tests) {
         const int before = failures;

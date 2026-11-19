@@ -107,6 +107,17 @@ Fomod::Environment environmentFor(const Instance &instance, const Profile &profi
 bool activateProfile(Instance &instance, const QString &name, const Callbacks &callbacks,
                      Deploy::Report *report, QString *error);
 
+/* Plugins.txt and loadorder.txt as they stand, to tell whether a sorter
+ * changed them. */
+QByteArray orderSnapshot(const Instance &instance);
+
+/* After a tool exits: new files it left in the game go to its output mod, or
+ * Overwrite, and a sorter's order is read back into profile, if it finished
+ * cleanly and changed something. orderBefore is orderSnapshot() from before
+ * it ran. Returns whether files were captured, which wants a deploy. */
+bool finishTool(Instance &instance, const Tool &tool, Profile *profile, bool failed,
+                const QByteArray &orderBefore, const Callbacks &callbacks);
+
 /* Merges INI tweak files into a target INI, keeping everything else as is. */
 bool mergeIni(const QString &target, const QStringList &tweakFiles, QString *error);
 

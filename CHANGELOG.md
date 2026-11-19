@@ -3,6 +3,25 @@
 fanMO's releases, newest first. Versions follow `MAJOR.MINOR.PATCH`; while
 it's 0.x, a minor release can change how things work.
 
+## 0.3.0 — 2026-11-19
+
+- `fanmo-cli run` plays without fanMO's window: it deploys the active
+  profile (only what changed), runs SKSE, or any tool named, the way Run
+  does, and waits for it. Files the game leaves in `Data` go to the tool's mod
+  or Overwrite, as with Run. It uses the instance fanMO last opened, and
+  refuses while the window is open.
+- `fanmo-cli add-launcher` adds "Skyrim Special Edition (fanMO)" to your
+  applications, with the game's icon read out of your `SkyrimSE.exe`. It
+  shows a desktop notification when it can't start the game, or the game
+  fails. `fanmo-cli remove-launcher` takes it away.
+- Enter in the Unlock Nexus dialog unlocks; it used to press Forgot
+  password.
+- Single downloads try each server Nexus offers until one works, and an error
+  names the server. They're saved under the archive's real name, now that
+  Nexus's links end in an id, and a failed one no longer leaves an empty
+  `.part` behind. A collection's own archive tries each server too.
+- `fanmo-cli` now links Qt Gui, which the window needs already.
+
 ## 0.2.1 — 2026-11-10
 
 - Adding LOOT as a tool no longer fills in `--game`, `--game-path` and

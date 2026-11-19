@@ -66,6 +66,10 @@ struct DownloadMeta {
     QString version;
     QString author;
     QString category;
+    /* The archive's own name on Nexus, such as "SkyUI_5_2_SE-12604-5-2SE.7z".
+     * Download links no longer carry it. Not kept in the meta file: the
+     * archive is saved under it. */
+    QString archive;
 };
 QString metaPath(const QString &archive);
 std::optional<DownloadMeta> loadDownloadMeta(const QString &archive);
@@ -138,7 +142,9 @@ public:
     std::optional<Endorsement> endorse(const QString &domain, qint64 modId, const QString &version,
                                        bool endorse, QString *error);
 
-    /* Downloads to dest, resuming a partial dest.part. progress gets bytes. */
+    /* Downloads to dest, resuming a partial dest.part. progress gets bytes.
+     * An error names the server, since a mirror can be down while others
+     * aren't. */
     bool download(const QString &url, const QString &dest, const Util::Progress &progress,
                   const std::atomic_bool *cancel, QString *error);
 

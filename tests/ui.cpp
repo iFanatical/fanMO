@@ -10,6 +10,10 @@
 #include "ui/style.h"
 
 #include <QApplication>
+#include <QDialogButtonBox>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QTimer>
 #include <QTabWidget>
 #include <QPlainTextEdit>
 #include <QComboBox>
@@ -27,6 +31,7 @@
 #include <QTreeView>
 
 #include <cstdio>
+#include <functional>
 
 static int failures = 0, checks = 0;
 #define CHECK(cond) do { ++checks; if (!(cond)) { ++failures; \
@@ -308,6 +313,10 @@ static void testWizard()
     /* Starts on the recommendation, with the later step ahead of it. */
     CHECK(button(&d, QStringLiteral("Fancy"))->isChecked());
     CHECK(button(&d, QStringLiteral("Next")));
+    /* Enter goes forward, not to Cancel. */
+    QApplication::processEvents();
+    CHECK(static_cast<QPushButton *>(button(&d, QStringLiteral("Next")))->isDefault());
+    CHECK(!static_cast<QPushButton *>(button(&d, QStringLiteral("Cancel")))->isDefault());
 
     /* Picking Plain hides step two: Next turns into Install. */
     button(&d, QStringLiteral("Plain"))->click();
@@ -627,6 +636,59 @@ static void testWindow()
     EQ(Deploy::blocker(inst).contains(QLatin1String("Vortex")), true);
 }
 
+/* Enter in a password dialog means "this is my password": Unlock or Protect,
+ * never Forgot password, whichever button the platform lays out first. */
+static void checkEnterAccepts(QDialog &dialog, const QString &accept, const std::function<bool()> &accepted)
+{
+    dialog.show();
+    QApplication::processEvents();
+    auto *field = qobject_cast<QLineEdit *>(QApplication::focusWidget());
+    CHECK(field);
+    QPushButton *def = nullptr;
+    for (QPushButton *b : dialog.findChildren<QPushButton *>())
+        if (b->isDefault())
+            def = b;
+    CHECK(def && def->text() == accept);
+    if (!field)
+        return;
+    field->setText(QStringLiteral("hunter2"));
+    /* Anything modal that pops up instead is a wrong button: close it. */
+    bool other = false;
+    QTimer::singleShot(500, [&] {
+        if (QWidget *m = QApplication::activeModalWidget(); m && m != &dialog) {
+            other = true;
+            m->close();
+        }
+    });
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(field, &press);
+    QApplication::processEvents();
+    CHECK(!other);
+    CHECK(accepted());
+    dialog.close();
+}
+
+static void testPasswordDialogs()
+{
+    UnlockDialog unlock;
+    /* No key is stored here, so unlocking fails, and says so. */
+    checkEnterAccepts(unlock, QStringLiteral("Unlock"), [&] {
+        for (QLabel *l : unlock.findChildren<QLabel *>())
+            if (l->objectName() == QLatin1String("muted") && !l->text().isEmpty())
+                return true;
+        return false;
+    });
+    CHECK(!unlock.forgot());
+
+    ProtectKeyDialog protect;
+    bool done = false;
+    QObject::connect(&protect, &QDialog::accepted, [&] { done = true; });
+    auto fields = protect.findChildren<QLineEdit *>();
+    for (QLineEdit *f : fields)
+        f->setText(QStringLiteral("hunter2"));
+    checkEnterAccepts(protect, QStringLiteral("Protect"), [&] { return done; });
+}
+
 int main(int argc, char *argv[])
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -641,6 +703,7 @@ int main(int argc, char *argv[])
     const struct { const char *name; void (*fn)(); } tests[] = {
         {"reorder", testReorder}, {"endorsement column", testEndorsementColumn}, {"plugin index", testPluginIndex},
         {"move after masters", testMoveAfterMasters}, {"fomod wizard", testWizard}, {"main window", testWindow}, {"tool run", testToolRun},
+        {"password dialogs", testPasswordDialogs},
     };
     for (const auto &t : tests) {
         const int before = failures;

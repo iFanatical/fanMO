@@ -3,6 +3,6 @@
 #ifndef FANMO_VERSION_H
 #define FANMO_VERSION_H
 
-#define FANMO_VERSION "0.2.1"
+#define FANMO_VERSION "0.3.0"
 
 #endif

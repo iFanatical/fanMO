@@ -443,10 +443,13 @@ UnlockDialog::UnlockDialog(QWidget *parent) : QDialog(parent)
     auto *buttons = new QDialogButtonBox;
     auto *unlock = buttons->addButton(QStringLiteral("Unlock"), QDialogButtonBox::AcceptRole);
     unlock->setObjectName(QStringLiteral("suggested"));
-    unlock->setDefault(true);
     buttons->addButton(QStringLiteral("Not now"), QDialogButtonBox::RejectRole);
     auto *forget = buttons->addButton(QStringLiteral("Forgot password…"), QDialogButtonBox::ResetRole);
     layout->addWidget(buttons);
+    /* Only once the button box is in the dialog: a button inside one isn't
+     * told when the box moves, so the dialog wouldn't know, and Qt would make
+     * the first button laid out (Forgot password) the one Enter presses. */
+    unlock->setDefault(true);
     connect(unlock, &QPushButton::clicked, this, &UnlockDialog::unlock);
     connect(forget, &QPushButton::clicked, this, &UnlockDialog::forget);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -504,9 +507,9 @@ ProtectKeyDialog::ProtectKeyDialog(QWidget *parent) : QDialog(parent)
     auto *buttons = new QDialogButtonBox;
     auto *protect = buttons->addButton(QStringLiteral("Protect"), QDialogButtonBox::AcceptRole);
     protect->setObjectName(QStringLiteral("suggested"));
-    protect->setDefault(true);
     buttons->addButton(QStringLiteral("Not now"), QDialogButtonBox::RejectRole);
     layout->addWidget(buttons);
+    protect->setDefault(true); /* once it's in the dialog, as above */
     connect(protect, &QPushButton::clicked, this, [this] {
         if (m_password->text().isEmpty())
             m_error->setText(QStringLiteral("Choose a password."));

@@ -996,22 +996,6 @@ void MainWindow::purge()
     });
 }
 
-/* The load order files as they stand, to tell whether a sorter changed them. */
-static QByteArray orderSnapshot(const Instance &instance)
-{
-    QByteArray out;
-    const QDir dir(instance.appDataPath());
-    for (const QString &name : dir.entryList(QDir::Files, QDir::Name)) {
-        const QString key = name.toLower();
-        if (key != QLatin1String("plugins.txt") && key != QLatin1String("loadorder.txt"))
-            continue;
-        QFile f(dir.filePath(name));
-        if (f.open(QIODevice::ReadOnly))
-            out += key.toUtf8() + '\n' + f.readAll() + '\n';
-    }
-    return out;
-}
-
 static QString duration(qint64 ms)
 {
     return ms < 60000 ? QStringLiteral("%1 s").arg(double(ms) / 1000.0, 0, 'f', 1)
@@ -1037,12 +1021,10 @@ void MainWindow::runTool()
         }
         /* What the tool and Proton print goes to a file, not to memory: a game
          * session can print a great deal. */
-        const QString logDir = m_instance.root() + QStringLiteral("/logs");
-        QDir().mkpath(logDir);
-        const QString logFile = logDir + QLatin1Char('/') + Util::safeFolderName(tool.name) + QStringLiteral(".log");
+        const QString logFile = Launcher::logFile(m_instance, tool);
         process->setProcessChannelMode(QProcess::MergedChannels);
         process->setStandardOutputFile(logFile);
-        const QByteArray before = tool.syncPlugins ? orderSnapshot(m_instance) : QByteArray();
+        const QByteArray before = tool.syncPlugins ? Engine::orderSnapshot(m_instance) : QByteArray();
         auto timer = std::make_shared<QElapsedTimer>();
 
         m_tool = process;
@@ -1093,61 +1075,16 @@ void MainWindow::toolFinished(const Tool &tool, int exitCode, bool crashed, qint
     if (failed) {
         log(crashed ? QStringLiteral("%1 crashed after %2").arg(tool.name, duration(ms))
                     : QStringLiteral("%1 exited with code %2 after %3").arg(tool.name).arg(exitCode).arg(duration(ms)));
-        /* The likeliest explanation is near the end: a missing DLL, say. */
-        QFile f(logFile);
-        if (f.open(QIODevice::ReadOnly)) {
-            QStringList lines;
-            for (const QByteArray &raw : f.readAll().split('\n')) {
-                const QString line = QString::fromUtf8(raw).trimmed();
-                if (line.contains(QLatin1String("err:")) || line.contains(QLatin1String("not found"),
-                                                                             Qt::CaseInsensitive))
-                    lines << line;
-            }
-            for (const QString &line : lines.mid(qMax(0, int(lines.size()) - 4)))
-                log(QStringLiteral("  %1").arg(line.left(200)));
-        }
+        for (const QString &line : Launcher::failureHints(logFile))
+            log(QStringLiteral("  %1").arg(line));
         log(QStringLiteral("  full output: %1").arg(logFile));
     } else {
         log(QStringLiteral("%1 finished after %2").arg(tool.name, duration(ms)));
     }
-    QString error;
-    const QStringList created = Deploy::unmanagedFiles(m_instance);
-    if (!created.isEmpty()) {
-        const QString dest = tool.outputMod.isEmpty()
-            ? m_instance.overwritePath()
-            : m_instance.modsPath() + QLatin1Char('/') + Util::safeFolderName(tool.outputMod);
-        const int moved = Deploy::captureInto(m_instance, created, dest, &error);
-        log(QStringLiteral("captured %1 new files into %2").arg(moved).arg(tool.outputMod.isEmpty()
-                                                                               ? QStringLiteral("Overwrite") : tool.outputMod));
-        if (!tool.outputMod.isEmpty()) {
-            const QString folder = Util::safeFolderName(tool.outputMod);
-            if (!m_instance.mods().contains(folder)) {
-                ModInfo info;
-                info.folder = folder;
-                info.name = tool.outputMod;
-                info.category = QStringLiteral("Tool output");
-                info.installed = QDateTime::currentSecsSinceEpoch();
-                m_instance.mods().insert(folder, info);
-                m_instance.save(&error);
-            }
-        }
+    Engine::Callbacks callbacks;
+    callbacks.log = [this](const QString &line) { log(line); };
+    if (Engine::finishTool(m_instance, tool, &m_profile, failed, orderBefore, callbacks))
         setDirty(true);
-    }
-    /* Reading the order back marks it sorted, so it has to be a real result. */
-    if (tool.syncPlugins && failed) {
-        log(QStringLiteral("load order not read back: %1 didn't finish cleanly, so nothing it did can be trusted")
-                .arg(tool.name));
-    } else if (tool.syncPlugins && orderSnapshot(m_instance) == orderBefore) {
-        log(QStringLiteral("%1 didn't change the load order. If it should have, sort and apply in it "
-                           "before closing it").arg(tool.name));
-    } else if (tool.syncPlugins) {
-        if (Plugins::read(m_instance, &m_profile, &error)) {
-            log(QStringLiteral("load order read back from %1").arg(tool.name));
-            m_instance.saveProfile(m_profile, &error);
-        } else {
-            log(error);
-        }
-    }
     QString ignored;
     m_instance.loadProfile(m_profile.name, &m_profile, &ignored);
     showRows();
@@ -1787,12 +1724,9 @@ void MainWindow::nextLink()
                 *error = QStringLiteral("Nexus gave no download link");
             return false;
         }
-        const QString name = QUrl(links.first()).fileName();
-        const QString dest = instance->downloadsPath() + QLatin1Char('/')
-            + Util::safeFolderName(name.isEmpty() ? QStringLiteral("%1-%2").arg(link.modId).arg(link.fileId) : name);
-        if (!client.download(links.first(), dest, c.progress, c.cancel, error))
-            return false;
-        /* What the link knows, and what Nexus says about it, for installing later. */
+        /* What the link knows, and what Nexus says about it, for installing
+         * later. Asked first: the archive's name comes from it, since
+         * download links end in an id now. */
         QString why;
         Nexus::DownloadMeta meta;
         if (const auto details = client.fileDetails(link.domain, link.modId, link.fileId, &why)) {
@@ -1804,6 +1738,23 @@ void MainWindow::nextLink()
             if (c.log)
                 c.log(QStringLiteral("Nexus didn't describe mod %1 (%2); it keeps its id, not its name").arg(link.modId).arg(why));
         }
+        QString name = meta.archive;
+        if (name.isEmpty())
+            name = QUrl(links.first()).fileName(QUrl::FullyDecoded);
+        if (name.isEmpty())
+            name = QStringLiteral("%1-%2").arg(link.modId).arg(link.fileId);
+        const QString dest = instance->downloadsPath() + QLatin1Char('/') + Util::safeFolderName(name);
+        /* A Premium account gets several servers: when one is down, the next. */
+        bool ok = false;
+        for (const QString &url : links) {
+            error->clear();
+            if ((ok = client.download(url, dest, c.progress, c.cancel, error)) || (c.cancel && c.cancel->load()))
+                break;
+            if (url != links.last() && c.log)
+                c.log(QStringLiteral("%1; trying the next server").arg(*error));
+        }
+        if (!ok)
+            return false;
         QString metaError;
         if (!Nexus::saveDownloadMeta(dest, meta, &metaError) && c.log)
             c.log(metaError);

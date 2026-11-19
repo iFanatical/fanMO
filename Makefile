@@ -17,6 +17,8 @@ override CXXFLAGS += -std=c++20 -O2 -Wall -Wextra -fPIC -Isrc \
                      $(shell pkg-config --cflags $(UI_PKGS))
 CORE_LIBS = $(shell pkg-config --libs $(CORE_PKGS)) -lbz2 -lz -lxxhash
 UI_LIBS   = $(shell pkg-config --libs $(UI_PKGS)) -lbz2 -lz -lxxhash
+# fanmo-cli reads images (the game's icon for add-launcher), but has no window.
+CLI_LIBS  = $(shell pkg-config --libs Qt6Gui $(CORE_PKGS)) -lbz2 -lz -lxxhash
 
 PREFIX   ?= $(HOME)/.local
 
@@ -34,7 +36,7 @@ fanmo: $(CORE_OBJ) $(UI_OBJ) build/main.o
 	$(CXX) -o $@ $^ $(UI_LIBS)
 
 fanmo-cli: $(CORE_OBJ) build/cli/main.o
-	$(CXX) -o $@ $^ $(CORE_LIBS)
+	$(CXX) -o $@ $^ $(CLI_LIBS)
 
 fanmo-tests: $(CORE_OBJ) build/tests/main.o
 	$(CXX) -o $@ $^ $(CORE_LIBS)
@@ -42,7 +44,7 @@ fanmo-tests: $(CORE_OBJ) build/tests/main.o
 fanmo-uitests: $(CORE_OBJ) $(UI_OBJ) build/tests/ui.o
 	$(CXX) -o $@ $^ $(UI_LIBS)
 
-test: fanmo-tests fanmo-uitests
+test: fanmo-tests fanmo-uitests fanmo-cli
 	./fanmo-tests
 	./fanmo-uitests
 

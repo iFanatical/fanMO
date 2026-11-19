@@ -87,6 +87,36 @@ their own. On a free account Nexus requires a click per file: the Collection
 tab lists what's needed and opens the pages, and archives already on disk (see
 Archive folders in Settings) are found by MD5 and never downloaded.
 
+## Playing without the window
+
+`fanmo-cli run` starts the game with fanMO's window closed, from a terminal, a
+desktop launcher or a keybind. It deploys the active profile (only what
+changed, so a deployed profile takes a moment), runs SKSE the way Run does,
+and waits for the game to exit. Then, like Run, it moves files the game left in
+`Data` into the tool's mod or Overwrite, and they go back in on the next deploy.
+
+```sh
+fanmo-cli run                     # SKSE, or Skyrim without it
+fanmo-cli run LOOT                # any tool from Settings, by name
+fanmo-cli run --profile Survival  # switches to that profile first
+```
+
+It uses the instance fanMO last opened (`--instance DIR` picks another) and
+refuses while fanMO's window is open, so the two don't change an instance at
+once; the other way round, opening the window mid-game is fine, but don't
+deploy or purge from it until the game is closed. The output goes to `logs/` in the instance, as with Run; if the game
+fails, the likeliest lines are printed and the exit code is passed on.
+`--no-deploy` runs without deploying.
+
+`fanmo-cli add-launcher` puts the game in your applications menu as
+"Skyrim Special Edition (fanMO)", running `fanmo-cli run` for the instance.
+Its icon is read out of your own `SkyrimSE.exe`, since it's Bethesda's and not
+fanMO's to ship. With no terminal to read, the launcher shows a desktop
+notification (through `notify-send`) when it can't start the game, or when the
+game fails. Run it from the installed `fanmo-cli`, since the launcher keeps
+the path of the one that made it. `fanmo-cli remove-launcher` takes it away
+again; `make uninstall` doesn't.
+
 ## Load order
 
 A collection doesn't contain a load order. Its plugin list only says which

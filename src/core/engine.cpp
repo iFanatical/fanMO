@@ -76,8 +76,18 @@ bool fetchCollection(const Instance &instance, const QString &apiKey, const QStr
     if (links.isEmpty())
         return false;
     const QString file = instance.collectionsPath() + QStringLiteral("/%1-%2.7z").arg(slug).arg(info->revision);
-    if (!QFileInfo::exists(file) && !client.download(links.first(), file, {}, callbacks.cancel, error))
-        return false;
+    if (!QFileInfo::exists(file)) {
+        /* Each server Nexus offers, in its order, until one works. */
+        bool ok = false;
+        for (const QString &link : links) {
+            error->clear();
+            if ((ok = client.download(link, file, {}, callbacks.cancel, error)) || cancelled(callbacks))
+                break;
+            log(callbacks, QStringLiteral("Couldn't download the collection (%1)").arg(*error));
+        }
+        if (!ok)
+            return false;
+    }
     return unpackBundle(instance, file, QStringLiteral("%1-%2").arg(slug).arg(info->revision), out, error);
 }
 
@@ -877,6 +887,68 @@ bool activateProfile(Instance &instance, const QString &name, const Callbacks &c
             callbacks.log(note);
     instance.setActiveProfile(name);
     return instance.save(error);
+}
+
+QByteArray orderSnapshot(const Instance &instance)
+{
+    QByteArray out;
+    const QDir dir(instance.appDataPath());
+    for (const QString &name : dir.entryList(QDir::Files, QDir::Name)) {
+        const QString key = name.toLower();
+        if (key != QLatin1String("plugins.txt") && key != QLatin1String("loadorder.txt"))
+            continue;
+        QFile f(dir.filePath(name));
+        if (f.open(QIODevice::ReadOnly))
+            out += key.toUtf8() + '\n' + f.readAll() + '\n';
+    }
+    return out;
+}
+
+bool finishTool(Instance &instance, const Tool &tool, Profile *profile, bool failed,
+                const QByteArray &orderBefore, const Callbacks &callbacks)
+{
+    QString error;
+    bool captured = false;
+    const QStringList created = Deploy::unmanagedFiles(instance);
+    if (!created.isEmpty()) {
+        const QString dest = tool.outputMod.isEmpty()
+            ? instance.overwritePath()
+            : instance.modsPath() + QLatin1Char('/') + Util::safeFolderName(tool.outputMod);
+        const int moved = Deploy::captureInto(instance, created, dest, &error);
+        log(callbacks, QStringLiteral("captured %1 new files into %2")
+                           .arg(moved).arg(tool.outputMod.isEmpty() ? QStringLiteral("Overwrite") : tool.outputMod));
+        if (moved < created.size() && !error.isEmpty())
+            log(callbacks, error);
+        if (!tool.outputMod.isEmpty()) {
+            const QString folder = Util::safeFolderName(tool.outputMod);
+            if (!instance.mods().contains(folder)) {
+                ModInfo info;
+                info.folder = folder;
+                info.name = tool.outputMod;
+                info.category = QStringLiteral("Tool output");
+                info.installed = QDateTime::currentSecsSinceEpoch();
+                instance.mods().insert(folder, info);
+                if (!instance.save(&error))
+                    log(callbacks, error);
+            }
+        }
+        captured = true;
+    }
+    /* Reading the order back marks it sorted, so it has to be a real result. */
+    if (!tool.syncPlugins)
+        return captured;
+    if (failed) {
+        log(callbacks, QStringLiteral("load order not read back: %1 didn't finish cleanly, so nothing it did "
+                                      "can be trusted").arg(tool.name));
+    } else if (orderSnapshot(instance) == orderBefore) {
+        log(callbacks, QStringLiteral("%1 didn't change the load order. If it should have, sort and apply in it "
+                                      "before closing it").arg(tool.name));
+    } else if (Plugins::read(instance, profile, &error) && instance.saveProfile(*profile, &error)) {
+        log(callbacks, QStringLiteral("load order read back from %1").arg(tool.name));
+    } else {
+        log(callbacks, error);
+    }
+    return captured;
 }
 
 } /* namespace Engine */
